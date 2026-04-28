@@ -1,0 +1,1 @@
+https://raw.githubusercontent.com/5rahim/seanime/refs/heads/main/internal/extension_repo/goja_plugin_types/core.d.ts

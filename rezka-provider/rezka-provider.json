@@ -1,0 +1,12 @@
+{
+  "id": "rezka-provider",
+  "name": "Rezka UA",
+  "description": "Online streaming provider for rezka-ua.co",
+  "version": "1.0.0",
+  "author": "y1tkyy",
+  "type": "onlinestream-provider",
+  "language": "typescript",
+  "lang": "uk",
+  "payloadURI": "https://raw.githubusercontent.com/y1tkyy/rezka-seanime/main/rezka-provider/provider.ts",
+  "manifestURI": "https://raw.githubusercontent.com/y1tkyy/rezka-seanime/main/rezka-provider/rezka-provider.json"
+}
