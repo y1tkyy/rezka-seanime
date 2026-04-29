@@ -40,6 +40,7 @@ class Provider {
 
     for (const q of queries) {
       const value = String(q || "").trim();
+
       if (value && cleanQueries.indexOf(value) === -1) {
         cleanQueries.push(value);
       }
@@ -53,6 +54,7 @@ class Provider {
 
     for (const q of cleanQueries) {
       const results = await this.searchRezka(q, year);
+
       if (results.length > 0) {
         return results;
       }
@@ -86,6 +88,7 @@ class Provider {
       }
 
       const titleMatch = inner.match(/<span class="enty">([\s\S]*?)<\/span>/i);
+
       if (!titleMatch) {
         continue;
       }
@@ -427,53 +430,50 @@ class Provider {
       }
     }
 
-    const urls = [
-      this.base + "/ajax/get_cdn_series/?t=" + Date.now(),
-    ];
-
-    const bodies = [
-      "id=" +
-        encodeURIComponent(data.animeId) +
-        "&translator_id=" +
-        encodeURIComponent(data.translatorId) +
-        "&season=" +
-        encodeURIComponent(String(data.season)) +
-        "&episode=" +
-        encodeURIComponent(String(data.episode)) +
-        "&action=get_stream",
-    ];
-
-    for (const url of urls) {
-      for (const body of bodies) {
-        try {
-          const res = await fetch(url, {
-            method: "POST",
-            headers: {
-              ...this.headers,
-              Origin: this.base,
-              Referer: data.baseUrl || data.url || this.base + "/",
-            },
-            body: body,
-          });
-
-          if (!res.ok) {
-            continue;
-          }
-
-          const text = await res.text();
-          const sources = this.extractSources(text);
-
-          if (sources.length > 0) {
-            return sources;
-          }
-        } catch (_) {}
-      }
-    }
-
     const inlineSources = await this.getInlineSeriesPageSources(data);
 
     if (inlineSources.length > 0) {
       return inlineSources;
+    }
+
+    const url = this.base + "/ajax/get_cdn_series/?t=" + Date.now();
+
+    const body =
+      "id=" +
+      encodeURIComponent(data.animeId) +
+      "&translator_id=" +
+      encodeURIComponent(data.translatorId) +
+      "&season=" +
+      encodeURIComponent(String(data.season)) +
+      "&episode=" +
+      encodeURIComponent(String(data.episode)) +
+      "&action=get_stream";
+
+    try {
+      console.log("Rezka AJAX body", body);
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          ...this.headers,
+          Origin: this.base,
+          Referer: data.baseUrl || data.url || this.base + "/",
+        },
+        body: body,
+      });
+
+      const text = await res.text();
+      console.log("Rezka AJAX response start", text.slice(0, 500));
+
+      if (res.ok) {
+        const sources = this.extractSources(text);
+
+        if (sources.length > 0) {
+          return sources;
+        }
+      }
+    } catch (e) {
+      console.error("Rezka AJAX failed", e);
     }
 
     return [];
@@ -493,51 +493,113 @@ class Provider {
       }
 
       const html = await res.text();
-      const init = this.extractInitCDNSeriesData(html);
+      const inits = this.extractAllInitCDNSeriesData(html);
 
-      if (!init) {
-        return [];
+      console.log("Inline init count", inits.length);
+      console.log(
+        "Requested stream data",
+        JSON.stringify({
+          animeId: data.animeId,
+          translatorId: data.translatorId,
+          season: data.season,
+          episode: data.episode,
+        })
+      );
+
+      for (const init of inits) {
+        console.log(
+          "Inline init item",
+          JSON.stringify({
+            animeId: init.animeId,
+            translatorId: init.translatorId,
+            season: init.season,
+            episode: init.episode,
+            streamsLen: init.streams.length,
+          })
+        );
+
+        if (
+          this.toNumber(init.animeId) === this.toNumber(data.animeId) &&
+          this.toNumber(init.translatorId) === this.toNumber(data.translatorId) &&
+          this.toNumber(init.season) === this.toNumber(data.season) &&
+          this.toNumber(init.episode) === this.toNumber(data.episode)
+        ) {
+          return this.extractRezkaStreamSources(init.streams);
+        }
       }
 
-      if (
-        this.toNumber(init.animeId) !== this.toNumber(data.animeId) ||
-        this.toNumber(init.translatorId) !== this.toNumber(data.translatorId) ||
-        this.toNumber(init.season) !== this.toNumber(data.season) ||
-        this.toNumber(init.episode) !== this.toNumber(data.episode)
-      ) {
-        return [];
-      }
-
-      return this.extractRezkaStreamSources(init.streams);
-    } catch (_) {
+      return [];
+    } catch (e) {
+      console.error("Inline series extraction failed", e);
       return [];
     }
   }
 
-  extractInitCDNSeriesData(html) {
+  extractAllInitCDNSeriesData(html) {
     html = String(html || "");
 
+    const results = [];
     const marker = "initCDNSeriesEvents(";
-    const index = html.indexOf(marker);
+    let start = 0;
 
-    if (index === -1) {
-      return null;
+    while (true) {
+      const index = html.indexOf(marker, start);
+
+      if (index === -1) {
+        break;
+      }
+
+      const rawArgs = this.readFunctionArgs(html, index + marker.length);
+
+      if (!rawArgs) {
+        start = index + marker.length;
+        continue;
+      }
+
+      const args = this.splitTopLevelArgs(rawArgs);
+
+      if (args.length >= 9) {
+        const objectText = args[8];
+        const streams = this.extractJsonStringValue(objectText, "streams");
+        const defaultQuality = this.extractJsonStringValue(objectText, "default_quality");
+
+        if (streams) {
+          results.push({
+            animeId: String(args[0]).trim(),
+            translatorId: String(args[1]).trim(),
+            season: String(args[2]).trim(),
+            episode: String(args[3]).trim(),
+            streams: streams,
+            defaultQuality: defaultQuality || "",
+          });
+        }
+      }
+
+      start = index + marker.length + rawArgs.length;
     }
 
-    let i = index + marker.length;
+    return results;
+  }
+
+  readFunctionArgs(input, startIndex) {
+    input = String(input || "");
+
+    let i = startIndex;
     let depth = 1;
     let quote = "";
     let escaped = false;
 
-    while (i < html.length) {
-      const ch = html[i];
+    while (i < input.length) {
+      const ch = input[i];
 
       if (escaped) {
         escaped = false;
       } else if (ch === "\\") {
         escaped = true;
       } else if (quote) {
-        if (ch === quote) quote = "";
+        if (ch === quote) {
+          quote = "";
+        }
       } else if (ch === '"' || ch === "'") {
         quote = ch;
       } else if (ch === "(") {
@@ -546,71 +608,31 @@ class Provider {
         depth--;
 
         if (depth === 0) {
-          break;
+          return input.slice(startIndex, i);
         }
       }
 
       i++;
     }
 
-    const rawArgs = html.slice(index + marker.length, i);
-    const args = this.splitTopLevelArgs(rawArgs);
+    return "";
+  }
 
-    if (args.length < 9) {
-      return null;
-    }
+  extractInitCDNSeriesData(html) {
+    const all = this.extractAllInitCDNSeriesData(html);
 
-    const animeId = args[0];
-    const translatorId = args[1];
-    const season = args[2];
-    const episode = args[3];
-    const objectText = args[8];
-
-    let streams = "";
-    let defaultQuality = "";
-
-    try {
-      const obj = JSON.parse(objectText);
-      streams = obj.streams || "";
-      defaultQuality = obj.default_quality || "";
-    } catch (_) {
-      const streamsMatch = objectText.match(/"streams"\s*:\s*"((?:\\"|\\.|[^"])*)"/i);
-      const defaultQualityMatch = objectText.match(/"default_quality"\s*:\s*"([^"]*)"/i);
-
-      if (streamsMatch) {
-        streams = streamsMatch[1];
-      }
-
-      if (defaultQualityMatch) {
-        defaultQuality = defaultQualityMatch[1];
-      }
-    }
-
-    streams = this.decodeRezkaEscapedString(streams);
-
-    if (!streams) {
-      return null;
-    }
-
-    return {
-      animeId: String(animeId).trim(),
-      translatorId: String(translatorId).trim(),
-      season: String(season).trim(),
-      episode: String(episode).trim(),
-      streams: streams,
-      defaultQuality: defaultQuality,
-    };
+    return all.length > 0 ? all[0] : null;
   }
 
   splitTopLevelArgs(input) {
+    input = String(input || "");
+
     const args = [];
     let current = "";
     let depthCurly = 0;
     let depthSquare = 0;
     let quote = "";
     let escaped = false;
-
-    input = String(input || "");
 
     for (let i = 0; i < input.length; i++) {
       const ch = input[i];
@@ -664,6 +686,57 @@ class Provider {
     return args;
   }
 
+  extractJsonStringValue(objectText, key) {
+    objectText = String(objectText || "");
+    key = String(key || "");
+
+    const marker = '"' + key + '"';
+    const keyIndex = objectText.indexOf(marker);
+
+    if (keyIndex === -1) {
+      return "";
+    }
+
+    const colonIndex = objectText.indexOf(":", keyIndex + marker.length);
+
+    if (colonIndex === -1) {
+      return "";
+    }
+
+    const quoteIndex = objectText.indexOf('"', colonIndex + 1);
+
+    if (quoteIndex === -1) {
+      return "";
+    }
+
+    let i = quoteIndex + 1;
+    let raw = "";
+    let escaped = false;
+
+    while (i < objectText.length) {
+      const ch = objectText[i];
+
+      if (escaped) {
+        raw += "\\" + ch;
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        break;
+      } else {
+        raw += ch;
+      }
+
+      i++;
+    }
+
+    try {
+      return JSON.parse('"' + raw + '"');
+    } catch (_) {
+      return this.decodeRezkaEscapedString(raw);
+    }
+  }
+
   decodeRezkaEscapedString(value) {
     return String(value || "")
       .replace(/\\\//g, "/")
@@ -677,7 +750,8 @@ class Provider {
 
     const sources = [];
     const seenQuality = {};
-    const blocks = streams.split(/,(?=\[\d{3,4}p\]|\[auto\])/i);
+
+    const blocks = streams.split(/,(?=\[(?:2160p|1440p|1080p|720p|480p|360p|240p|auto)\])/i);
 
     for (const block of blocks) {
       const match = block.match(/\[([^\]]+)\]([\s\S]+)/);
@@ -688,11 +762,7 @@ class Provider {
 
       const quality = this.normalizeQuality(match[1]);
 
-      if (!quality || this.isBadQuality(quality)) {
-        continue;
-      }
-
-      if (seenQuality[quality]) {
+      if (!quality || seenQuality[quality]) {
         continue;
       }
 
@@ -709,7 +779,7 @@ class Provider {
           continue;
         }
 
-        if (url.indexOf(".m3u8") === -1 && url.indexOf(":hls:manifest") === -1) {
+        if (url.indexOf(":hls:manifest.m3u8") === -1 && url.indexOf(".m3u8") === -1) {
           continue;
         }
 
@@ -721,11 +791,11 @@ class Provider {
       }
 
       urls.sort((a, b) => {
-        const au = /ukrtelcdn/i.test(a) ? 1 : 0;
-        const bu = /ukrtelcdn/i.test(b) ? 1 : 0;
+        const aRezka = /ukrtelcdn/i.test(a) ? 1 : 0;
+        const bRezka = /ukrtelcdn/i.test(b) ? 1 : 0;
 
-        if (au !== bu) {
-          return bu - au;
+        if (aRezka !== bRezka) {
+          return bRezka - aRezka;
         }
 
         return a.localeCompare(b);
@@ -734,6 +804,16 @@ class Provider {
       seenQuality[quality] = true;
       this.addSource(sources, urls[0], quality);
     }
+
+    console.log(
+      "Extracted Rezka sources",
+      JSON.stringify(
+        sources.map((s) => ({
+          quality: s.quality,
+          url: s.url.slice(0, 80),
+        }))
+      )
+    );
 
     return this.dedupeSources(sources);
   }
@@ -903,22 +983,22 @@ class Provider {
       return this.dedupeSources(sources);
     } catch (_) {}
 
-    const decoded = this.decodeStreamString(text);
-
-    if (decoded && decoded !== text) {
-      const rezkaSources = this.extractRezkaStreamSources(decoded);
-
-      if (rezkaSources.length > 0) {
-        return rezkaSources;
-      }
-
-      this.extractSourceString(decoded, sources);
-    }
-
     const rezkaSources = this.extractRezkaStreamSources(text);
 
     if (rezkaSources.length > 0) {
       return rezkaSources;
+    }
+
+    const decoded = this.decodeStreamString(text);
+
+    if (decoded && decoded !== text) {
+      const decodedRezkaSources = this.extractRezkaStreamSources(decoded);
+
+      if (decodedRezkaSources.length > 0) {
+        return decodedRezkaSources;
+      }
+
+      this.extractSourceString(decoded, sources);
     }
 
     this.extractSourceString(text, sources);
@@ -940,6 +1020,7 @@ class Provider {
       for (const item of value) {
         this.extractSourceValue(item, sources);
       }
+
       return;
     }
 
@@ -1116,6 +1197,7 @@ class Provider {
 
     try {
       const decoded = CryptoJS.enc.Utf8.stringify(CryptoJS.enc.Base64.parse(cleaned));
+
       if (decoded && decoded.indexOf("http") !== -1) {
         return decoded;
       }
@@ -1737,6 +1819,7 @@ class Provider {
   getAttr(input, name) {
     const regex = new RegExp(name + '=["\']([^"\']+)["\']', "i");
     const match = String(input || "").match(regex);
+
     return match ? this.decodeHtml(match[1]) : "";
   }
 
@@ -1746,6 +1829,7 @@ class Provider {
     }
 
     const parsed = parseInt(value, 10);
+
     return Number.isFinite(parsed) ? parsed : 0;
   }
 
