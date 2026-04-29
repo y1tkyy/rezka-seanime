@@ -269,41 +269,30 @@ class Provider {
     }
 
     if (episodes.length === 0) {
-      const seasonNumber =
-        this.extractSeasonNumber(url) ||
-        this.extractSeasonNumberFromHash(url) ||
-        1;
-
-      const episodeNumber =
-        this.extractEpisodeNumber(url) ||
-        this.extractEpisodeNumberFromHash(url) ||
-        1;
-
-      const epUrl = this.makeEpisodeUrl(
-        url,
-        translatorId,
-        seasonNumber,
-        episodeNumber
-      );
+      const movieUrl =
+        activeTranslator.url && activeTranslator.url !== url
+          ? activeTranslator.url
+          : url;
 
       const payload = {
-        url: epUrl,
+        url: movieUrl,
         baseUrl: this.basePageUrl(url),
         animeId: animeId,
         translatorId: translatorId,
         translatorName: translatorName,
         translators: translators,
-        season: seasonNumber,
-        episode: episodeNumber,
+        season: 0,
+        episode: 0,
+        isMovie: true,
       };
 
       episodes.push({
         id: JSON.stringify(payload),
         number: 1,
-        title: "Episode 1",
-        url: epUrl,
-        _season: seasonNumber,
-        _episode: episodeNumber,
+        title: "Movie",
+        url: movieUrl,
+        _season: 1,
+        _episode: 1,
       });
     }
 
@@ -367,12 +356,14 @@ class Provider {
         continue;
       }
 
-      const episodeUrl = this.makeEpisodeUrl(
-        data.baseUrl || translator.url || data.url,
-        translatorId,
-        data.season,
-        data.episode
-      );
+      const episodeUrl = data.isMovie
+        ? this.getTranslatorPageUrl(data.baseUrl || data.url, translator)
+        : this.makeEpisodeUrl(
+            data.baseUrl || translator.url || data.url,
+            translatorId,
+            data.season,
+            data.episode
+          );
 
       const translatorData = {
         url: episodeUrl,
@@ -382,6 +373,7 @@ class Provider {
         translatorName: translator.name || "Translator " + translatorId,
         season: data.season,
         episode: data.episode,
+        isMovie: data.isMovie === true,
       };
 
       const sources = await this.getStreamSources(translatorData);
@@ -427,6 +419,14 @@ class Provider {
   }
 
   async getStreamSources(data) {
+    if (data.isMovie) {
+      const directSources = await this.getMoviePageSources(data);
+
+      if (directSources.length > 0) {
+        return directSources;
+      }
+    }
+
     const urls = [
       this.base + "/ajax/get_cdn_series/?t=" + Date.now(),
       this.base + "/engine/ajax/get_cdn_series/?t=" + Date.now(),
@@ -479,6 +479,61 @@ class Provider {
     }
 
     return [];
+  }
+
+  async getMoviePageSources(data) {
+    try {
+      const res = await fetch(data.url, {
+        headers: {
+          ...this.headers,
+          Referer: data.baseUrl || this.base + "/",
+        },
+      });
+
+      if (!res.ok) {
+        return [];
+      }
+
+      const html = await res.text();
+      const sources = [];
+      const videoRegex = /<video[^>]+src=["']([^"']+)["'][^>]*>/gi;
+      let videoMatch;
+
+      while ((videoMatch = videoRegex.exec(html)) !== null) {
+        this.addSource(sources, videoMatch[1], this.extractPlayerQuality(html) || "auto");
+      }
+
+      this.extractSourceString(html, sources);
+
+      return this.dedupeSources(sources);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  extractPlayerQuality(html) {
+    const text = this.cleanText(html);
+    const match = text.match(/Качество\s*(2160p|1440p|1080p|720p|480p|360p|240p|auto)/i);
+
+    if (match) {
+      return match[1];
+    }
+
+    return "";
+  }
+
+  getTranslatorPageUrl(baseUrl, translator) {
+    if (translator && translator.url) {
+      return translator.url;
+    }
+
+    const clean = this.basePageUrl(baseUrl);
+
+    if (translator && translator.id && translator.id !== "0") {
+      return clean.replace(/\.html$/i, "/" + translator.id + "-translator.html");
+    }
+
+    return clean;
   }
 
   extractSources(text) {
@@ -804,6 +859,10 @@ class Provider {
       return String(a.quality).localeCompare(String(b.quality));
     });
 
+    if (result.length === 0) {
+      return [];
+    }
+
     const defaultSource = result[0];
     const rest = result.slice(1).reverse();
 
@@ -935,7 +994,14 @@ class Provider {
   parseEpisodeId(episode) {
     try {
       const parsed = JSON.parse(episode.id);
+
       if (parsed && parsed.url) {
+        parsed.isMovie = parsed.isMovie === true;
+        parsed.season = this.toNumber(parsed.season);
+        parsed.episode = this.toNumber(parsed.episode);
+        parsed.baseUrl = parsed.baseUrl || this.basePageUrl(parsed.url);
+        parsed.translators = parsed.translators || [];
+
         return parsed;
       }
     } catch (_) {}
@@ -949,6 +1015,7 @@ class Provider {
       translatorId: this.extractTranslatorIdFromUrl(url) || "0",
       translatorName: "Default",
       translators: [],
+      isMovie: false,
       season:
         this.extractSeasonNumber(url) ||
         this.extractSeasonNumberFromHash(url) ||
