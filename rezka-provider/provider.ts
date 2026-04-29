@@ -3,7 +3,7 @@
 
 class Provider {
   constructor() {
-    this.base = "https://rezka-ua.co";
+    this.base = "https://rezka.ag";
     this.headers = {
       Accept: "text/html, */*; q=0.01",
       "Accept-Language": "en-US,en;q=0.9,uk;q=0.8,ru;q=0.7",
@@ -410,8 +410,8 @@ class Provider {
       headers: {
         Accept: "*/*",
         "Accept-Language": "en-US,en;q=0.9",
-        Origin: this.base,
-        Referer: this.base + "/",
+        Origin: "https://rezka.ag",
+        Referer: "https://rezka.ag/",
         "User-Agent": this.headers["User-Agent"],
       },
       videoSources: cleaned,
@@ -490,23 +490,110 @@ class Provider {
         },
       });
 
-      if (!res.ok) {
-        return [];
-      }
+      if (res.ok) {
+        const html = await res.text();
+        const sources = [];
+        const directVideoRegex = /<video[^>]+src=["']([^"']+(?:\.m3u8|\.mp4)[^"']*)["'][^>]*>/gi;
+        let directVideoMatch;
 
-      const html = await res.text();
+        while ((directVideoMatch = directVideoRegex.exec(html)) !== null) {
+          this.addSource(
+            sources,
+            directVideoMatch[1],
+            this.extractPlayerQuality(html) || "auto"
+          );
+        }
+
+        this.extractSourceString(html, sources);
+
+        const cleaned = this.dedupeSources(sources);
+
+        if (cleaned.length > 0) {
+          return cleaned;
+        }
+      }
+    } catch (_) {}
+
+    return await this.getMoviePageSourcesWithBrowser(data);
+  }
+
+  async getMoviePageSourcesWithBrowser(data) {
+    let browser = null;
+
+    try {
+      browser = await ChromeDP.newBrowser();
+
+      await browser.navigate(data.url);
+
+      $sleep(2500);
+
+      const result = await browser.evaluate(`(() => {
+        const clean = (s) => String(s || "").replace(/\\s+/g, " ").trim();
+
+        const videos = Array.from(document.querySelectorAll("video"))
+          .map(v => v.currentSrc || v.src || v.getAttribute("src") || "")
+          .filter(Boolean);
+
+        const sources = Array.from(document.querySelectorAll("source"))
+          .map(s => s.src || s.getAttribute("src") || "")
+          .filter(Boolean);
+
+        const iframes = Array.from(document.querySelectorAll("iframe"))
+          .map(i => i.src || i.getAttribute("src") || "")
+          .filter(Boolean);
+
+        const qualityText = clean(
+          Array.from(document.querySelectorAll("#cdnplayer_settings, [fid='1'], pjsdiv"))
+            .map(el => el.textContent)
+            .join(" ")
+        );
+
+        const qualityMatch = qualityText.match(/Качество\\s*(2160p|1440p|1080p|720p|480p|360p|240p|auto)/i);
+
+        return JSON.stringify({
+          videos,
+          sources,
+          iframes,
+          quality: qualityMatch ? qualityMatch[1] : "auto",
+          html: document.documentElement.outerHTML
+        });
+      })()`);
+
+      await browser.close();
+      browser = null;
+
+      const parsed = JSON.parse(result || "{}");
       const sources = [];
-      const videoRegex = /<video[^>]+src=["']([^"']+)["'][^>]*>/gi;
-      let videoMatch;
+      const quality = parsed.quality || "auto";
+      const urls = []
+        .concat(parsed.videos || [])
+        .concat(parsed.sources || []);
 
-      while ((videoMatch = videoRegex.exec(html)) !== null) {
-        this.addSource(sources, videoMatch[1], this.extractPlayerQuality(html) || "auto");
+      for (const url of urls) {
+        this.addSource(sources, url, quality);
       }
 
-      this.extractSourceString(html, sources);
+      if (parsed.html) {
+        const html = String(parsed.html);
+        const videoRegex = /<video[^>]+src=["']([^"']+(?:\.m3u8|\.mp4)[^"']*)["'][^>]*>/gi;
+        let videoMatch;
+
+        while ((videoMatch = videoRegex.exec(html)) !== null) {
+          this.addSource(sources, videoMatch[1], quality);
+        }
+
+        this.extractSourceString(html, sources);
+      }
 
       return this.dedupeSources(sources);
-    } catch (_) {
+    } catch (e) {
+      try {
+        if (browser) {
+          await browser.close();
+        }
+      } catch (_) {}
+
+      console.error("Movie ChromeDP extraction failed", e);
       return [];
     }
   }
@@ -1298,10 +1385,9 @@ class Provider {
 
   normalizeUrl(url) {
     return String(url || "")
-      .replace("https://rezka.ag", this.base)
-      .replace("https://rezka-ua.co", this.base)
-      .replace("http://rezka.ag", this.base)
-      .replace("http://rezka-ua.co", this.base);
+      .replace("https://rezka-ua.co", "https://rezka.ag")
+      .replace("http://rezka-ua.co", "https://rezka.ag")
+      .replace("http://rezka.ag", "https://rezka.ag");
   }
 
   cleanText(input) {
