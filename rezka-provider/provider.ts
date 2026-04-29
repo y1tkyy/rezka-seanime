@@ -535,6 +535,38 @@ class Provider {
     }
   }
 
+  async getInlineMoviePageSources(data) {
+    try {
+      const res = await fetch(data.url, {
+        headers: {
+          ...this.headers,
+          Referer: data.baseUrl || this.base + "/",
+        },
+      });
+
+      if (!res.ok) {
+        return [];
+      }
+
+      const html = await res.text();
+      const inits = this.extractAllInitCDNMoviesData(html);
+
+      for (const init of inits) {
+        if (
+          this.toNumber(init.animeId) === this.toNumber(data.animeId) &&
+          this.toNumber(init.translatorId) === this.toNumber(data.translatorId)
+        ) {
+          return this.extractRezkaStreamSources(init.streams);
+        }
+      }
+
+      return [];
+    } catch (e) {
+      console.error("Inline movie extraction failed", e);
+      return [];
+    }
+  }
+
   extractAllInitCDNSeriesData(html) {
     html = String(html || "");
 
@@ -573,6 +605,49 @@ class Provider {
             defaultQuality: defaultQuality || "",
           });
         }
+      }
+
+      start = index + marker.length + rawArgs.length;
+    }
+
+    return results;
+  }
+
+  extractAllInitCDNMoviesData(html) {
+    html = String(html || "");
+
+    const results = [];
+    const marker = "initCDNMoviesEvents(";
+    let start = 0;
+
+    while (true) {
+      const index = html.indexOf(marker, start);
+
+      if (index === -1) {
+        break;
+      }
+
+      const rawArgs = this.readFunctionArgs(html, index + marker.length);
+
+      if (!rawArgs) {
+        start = index + marker.length;
+        continue;
+      }
+
+      const args = this.splitTopLevelArgs(rawArgs);
+      const animeId = args[0];
+      const translatorId = args[1];
+      const objectText = args[args.length - 1];
+      const streams = this.extractJsonStringValue(objectText, "streams");
+      const defaultQuality = this.extractJsonStringValue(objectText, "default_quality");
+
+      if (streams) {
+        results.push({
+          animeId: String(animeId).trim(),
+          translatorId: String(translatorId).trim(),
+          streams: streams,
+          defaultQuality: defaultQuality || "",
+        });
       }
 
       start = index + marker.length + rawArgs.length;
@@ -819,6 +894,12 @@ class Provider {
   }
 
   async getMoviePageSources(data) {
+    const inlineMovieSources = await this.getInlineMoviePageSources(data);
+
+    if (inlineMovieSources.length > 0) {
+      return inlineMovieSources;
+    }
+
     try {
       const res = await fetch(data.url, {
         headers: {
@@ -908,6 +989,23 @@ class Provider {
 
       for (const url of urls) {
         this.addSource(sources, url, quality);
+      }
+
+      if (parsed.html) {
+        const movieInits = this.extractAllInitCDNMoviesData(parsed.html);
+
+        for (const init of movieInits) {
+          if (
+            this.toNumber(init.animeId) === this.toNumber(data.animeId) &&
+            this.toNumber(init.translatorId) === this.toNumber(data.translatorId)
+          ) {
+            const allSources = this.extractRezkaStreamSources(init.streams);
+
+            if (allSources.length > 0) {
+              return allSources;
+            }
+          }
+        }
       }
 
       if (parsed.html) {
@@ -1306,20 +1404,27 @@ class Provider {
       return String(a.quality).localeCompare(String(b.quality));
     });
 
-    if (result.length === 0) {
-      return [];
-    }
-
-    const defaultSource = result[0];
-    const rest = result.slice(1).reverse();
-
-    return [defaultSource].concat(rest).map((source) => ({
+    const cleaned = result.map((source) => ({
       url: source.url,
       type: source.type,
       quality: source.quality,
       label: source.label,
       subtitles: source.subtitles || [],
     }));
+
+    const translatorKeys = {};
+
+    for (const source of result) {
+      translatorKeys[String(source._translatorIndex)] = true;
+    }
+
+    const translatorCount = Object.keys(translatorKeys).length;
+
+    if (translatorCount <= 1) {
+      return cleaned;
+    }
+
+    return [cleaned[0]].concat(cleaned.slice(1).reverse());
   }
 
   qualityRank(value) {
