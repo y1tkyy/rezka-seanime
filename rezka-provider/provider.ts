@@ -2,40 +2,41 @@
 /// <reference path="./core.d.ts" />
 
 class Provider {
-  base = "https://rezka-ua.co";
+  constructor() {
+    this.base = "https://rezka-ua.co";
+    this.headers = {
+      Accept: "text/html, */*; q=0.01",
+      "Accept-Language": "en-US,en;q=0.9,uk;q=0.8,ru;q=0.7",
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      Origin: this.base,
+      Referer: this.base + "/",
+      "X-Requested-With": "XMLHttpRequest",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    };
+  }
 
-  headers = {
-    Accept: "text/html, */*; q=0.01",
-    "Accept-Language": "en-US,en;q=0.9,uk;q=0.8,ru;q=0.7",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    Origin: "https://rezka-ua.co",
-    Referer: "https://rezka-ua.co/",
-    "X-Requested-With": "XMLHttpRequest",
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-  };
-
-  getSettings(): Settings {
+  getSettings() {
     return {
-      episodeServers: ["default"],
+      episodeServers: ["HLS"],
       supportsDub: true,
     };
   }
 
-  async search(query: SearchOptions): Promise<SearchResult[]> {
+  async search(opts) {
     const queries = [
-      query.query,
-      query.media && query.media.englishTitle ? query.media.englishTitle : "",
-      query.media && query.media.romajiTitle ? query.media.romajiTitle : "",
+      opts.query,
+      opts.media && opts.media.englishTitle ? opts.media.englishTitle : "",
+      opts.media && opts.media.romajiTitle ? opts.media.romajiTitle : "",
     ];
 
-    if (query.media && query.media.synonyms) {
-      for (const synonym of query.media.synonyms) {
+    if (opts.media && opts.media.synonyms) {
+      for (const synonym of opts.media.synonyms) {
         queries.push(synonym);
       }
     }
 
-    const cleanQueries: string[] = [];
+    const cleanQueries = [];
 
     for (const q of queries) {
       const value = String(q || "").trim();
@@ -45,9 +46,9 @@ class Provider {
     }
 
     const year =
-      query.year ||
-      (query.media && query.media.startDate && query.media.startDate.year
-        ? query.media.startDate.year
+      opts.year ||
+      (opts.media && opts.media.startDate && opts.media.startDate.year
+        ? opts.media.startDate.year
         : 0);
 
     for (const q of cleanQueries) {
@@ -60,7 +61,7 @@ class Provider {
     return [];
   }
 
-  async searchRezka(q: string, year: number): Promise<SearchResult[]> {
+  async searchRezka(q, year) {
     const res = await fetch(this.base + "/engine/ajax/search.php", {
       method: "POST",
       headers: this.headers,
@@ -72,9 +73,9 @@ class Provider {
     }
 
     const html = await res.text();
-    const results: SearchResult[] = [];
+    const results = [];
     const regex = /<li>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/li>/g;
-    let match: RegExpExecArray | null;
+    let match;
 
     while ((match = regex.exec(html)) !== null) {
       const url = this.normalizeUrl(this.decodeHtml(match[1]));
@@ -113,7 +114,7 @@ class Provider {
     return results;
   }
 
-  async findEpisodes(id: string): Promise<EpisodeDetails[]> {
+  async findEpisodes(id) {
     const url = this.resolveUrl(id);
 
     const res = await fetch(url, {
@@ -130,85 +131,23 @@ class Provider {
     const html = await res.text();
     const animeId = this.extractAnimeId(html, url);
     const translators = this.extractTranslators(html, url);
-    const activeTranslator = this.extractTranslator(html, url);
-    const episodes: EpisodeDetails[] = [];
-    const seen: { [key: string]: boolean } = {};
+    const activeTranslator = this.extractActiveTranslator(html, url, translators);
+    const episodes = [];
+    const seen = {};
 
-    const liRegex = /<li\b([^>]*class=["'][^"']*b-simple_episode__item[^"']*["'][^>]*)>([\s\S]*?)<\/li>/gi;
-    let liMatch: RegExpExecArray | null;
-
-    while ((liMatch = liRegex.exec(html)) !== null) {
-      const attrs = liMatch[1];
-      const text = this.cleanText(liMatch[2]);
-      const episodeNumber =
-        this.toNumber(this.getAttr(attrs, "data-episode_id")) ||
-        this.extractEpisodeNumber(text);
-
-      if (!episodeNumber) {
-        continue;
-      }
-
-      const seasonNumber =
-        this.toNumber(this.getAttr(attrs, "data-season_id")) ||
-        this.extractSeasonNumber(url) ||
-        this.extractSeasonNumberFromHash(url) ||
-        1;
-
-      const key = seasonNumber + ":" + episodeNumber;
-
-      if (seen[key]) {
-        continue;
-      }
-
-      seen[key] = true;
-
-      const translatorId =
-        activeTranslator.id ||
-        this.extractTranslatorIdFromUrl(url) ||
-        (translators.length ? translators[0].id : "0");
-
-      const translatorName =
-        activeTranslator.name ||
-        (translators.length ? translators[0].name : "Default");
-
-      const epUrl = this.makeHashEpisodeUrl(url, translatorId, seasonNumber, episodeNumber);
-
-      const payload = {
-        url: epUrl,
-        animeId: this.getAttr(attrs, "data-id") || animeId,
-        translatorId: translatorId,
-        translatorName: translatorName,
-        translators: translators,
-        season: seasonNumber,
-        episode: episodeNumber,
-      };
-
-      episodes.push({
-        id: JSON.stringify(payload),
-        number: episodeNumber,
-        title: "Episode " + episodeNumber,
-        url: epUrl,
-      });
-    }
-
-    const aRegex = /<a\b([^>]*class=["'][^"']*b-simple_episode__item[^"']*["'][^>]*)>([\s\S]*?)<\/a>/gi;
-    let aMatch: RegExpExecArray | null;
-
-    while ((aMatch = aRegex.exec(html)) !== null) {
-      const attrs = aMatch[1];
-      const text = this.cleanText(aMatch[2]);
+    const addEpisode = (attrs, text, href) => {
       const episodeNumber =
         this.toNumber(this.getAttr(attrs, "data-episode_id")) ||
         this.extractEpisodeNumber(text) ||
-        this.extractEpisodeNumber(this.getAttr(attrs, "href"));
+        this.extractEpisodeNumber(href);
 
       if (!episodeNumber) {
-        continue;
+        return;
       }
 
       const seasonNumber =
         this.toNumber(this.getAttr(attrs, "data-season_id")) ||
-        this.extractSeasonNumber(this.getAttr(attrs, "href")) ||
+        this.extractSeasonNumber(href) ||
         this.extractSeasonNumber(url) ||
         this.extractSeasonNumberFromHash(url) ||
         1;
@@ -216,7 +155,7 @@ class Provider {
       const key = seasonNumber + ":" + episodeNumber;
 
       if (seen[key]) {
-        continue;
+        return;
       }
 
       seen[key] = true;
@@ -224,16 +163,17 @@ class Provider {
       const translatorId =
         activeTranslator.id ||
         this.extractTranslatorIdFromUrl(url) ||
-        (translators.length ? translators[0].id : "0");
+        (translators.length > 0 ? translators[0].id : "0");
 
       const translatorName =
         activeTranslator.name ||
-        (translators.length ? translators[0].name : "Default");
+        (translators.length > 0 ? translators[0].name : "Default");
 
-      const epUrl = this.makeHashEpisodeUrl(url, translatorId, seasonNumber, episodeNumber);
+      const epUrl = this.makeEpisodeUrl(url, translatorId, seasonNumber, episodeNumber);
 
       const payload = {
         url: epUrl,
+        baseUrl: this.basePageUrl(url),
         animeId: this.getAttr(attrs, "data-id") || animeId,
         translatorId: translatorId,
         translatorName: translatorName,
@@ -248,6 +188,34 @@ class Provider {
         title: "Episode " + episodeNumber,
         url: epUrl,
       });
+    };
+
+    const itemRegex = /<(?:li|a)\b([^>]*class=["'][^"']*b-simple_episode__item[^"']*["'][^>]*)>([\s\S]*?)<\/(?:li|a)>/gi;
+    let itemMatch;
+
+    while ((itemMatch = itemRegex.exec(html)) !== null) {
+      addEpisode(itemMatch[1], this.cleanText(itemMatch[2]), this.getAttr(itemMatch[1], "href"));
+    }
+
+    const dataRegex = /<[^>]*data-id=["']\d+["'][^>]*data-season_id=["']\d+["'][^>]*data-episode_id=["']\d+["'][^>]*>/gi;
+    let dataMatch;
+
+    while ((dataMatch = dataRegex.exec(html)) !== null) {
+      addEpisode(dataMatch[0], "", this.getAttr(dataMatch[0], "href"));
+    }
+
+    const dataRegexAlt = /<[^>]*data-episode_id=["']\d+["'][^>]*data-season_id=["']\d+["'][^>]*data-id=["']\d+["'][^>]*>/gi;
+    let dataAltMatch;
+
+    while ((dataAltMatch = dataRegexAlt.exec(html)) !== null) {
+      addEpisode(dataAltMatch[0], "", this.getAttr(dataAltMatch[0], "href"));
+    }
+
+    if (episodes.length === 0) {
+      const hashEpisodes = this.extractHashEpisodes(html, url, animeId, activeTranslator, translators);
+      for (const ep of hashEpisodes) {
+        episodes.push(ep);
+      }
     }
 
     if (episodes.length === 0) {
@@ -264,16 +232,17 @@ class Provider {
       const translatorId =
         activeTranslator.id ||
         this.extractTranslatorIdFromUrl(url) ||
-        (translators.length ? translators[0].id : "0");
+        (translators.length > 0 ? translators[0].id : "0");
 
       const translatorName =
         activeTranslator.name ||
-        (translators.length ? translators[0].name : "Default");
+        (translators.length > 0 ? translators[0].name : "Default");
 
-      const epUrl = this.makeHashEpisodeUrl(url, translatorId, seasonNumber, episodeNumber);
+      const epUrl = this.makeEpisodeUrl(url, translatorId, seasonNumber, episodeNumber);
 
       const payload = {
         url: epUrl,
+        baseUrl: this.basePageUrl(url),
         animeId: animeId,
         translatorId: translatorId,
         translatorName: translatorName,
@@ -295,22 +264,24 @@ class Provider {
     return episodes;
   }
 
-  async findEpisodeServer(episode: EpisodeDetails, server: string): Promise<EpisodeServer> {
-    const data = this.parseEpisodeId(episode);
+  async findEpisodeServer(episodeOrId, server) {
+    const data = this.parseEpisodeId(episodeOrId);
     let translators = data.translators && data.translators.length ? data.translators : [];
 
     if (translators.length === 0) {
-      const res = await fetch(data.url, {
-        headers: {
-          ...this.headers,
-          Referer: this.base + "/",
-        },
-      });
+      try {
+        const res = await fetch(data.url, {
+          headers: {
+            ...this.headers,
+            Referer: this.base + "/",
+          },
+        });
 
-      if (res.ok) {
-        const html = await res.text();
-        translators = this.extractTranslators(html, data.url);
-      }
+        if (res.ok) {
+          const html = await res.text();
+          translators = this.extractTranslators(html, data.url);
+        }
+      } catch (_) {}
     }
 
     if (translators.length === 0) {
@@ -323,15 +294,23 @@ class Provider {
       ];
     }
 
-    const videoSources: VideoSource[] = [];
+    const videoSources = [];
 
     for (const translator of translators) {
       if (!translator.id || translator.id === "0") {
         continue;
       }
 
+      const episodeUrl = this.makeEpisodeUrl(
+        translator.url || data.url,
+        translator.id,
+        data.season,
+        data.episode
+      );
+
       const translatorData = {
-        url: this.makeHashEpisodeUrl(data.url, translator.id, data.season, data.episode),
+        url: episodeUrl,
+        baseUrl: data.baseUrl || this.basePageUrl(data.url),
         animeId: data.animeId,
         translatorId: translator.id,
         translatorName: translator.name,
@@ -345,19 +324,21 @@ class Provider {
         videoSources.push({
           url: source.url,
           type: source.type,
-          quality: source.quality,
+          quality: translator.name + " - " + source.quality,
           label: translator.name,
-          subtitles: source.subtitles || [],
+          subtitles: [],
         });
       }
     }
 
-    if (videoSources.length === 0) {
+    const cleaned = this.dedupeSources(videoSources);
+
+    if (cleaned.length === 0) {
       throw new Error("No video sources found");
     }
 
     return {
-      server: server === "default" ? "default" : server,
+      server: server || "HLS",
       headers: {
         Accept: "*/*",
         "Accept-Language": "en-US,en;q=0.9",
@@ -365,77 +346,86 @@ class Provider {
         Referer: this.base + "/",
         "User-Agent": this.headers["User-Agent"],
       },
-      videoSources: this.dedupeSources(videoSources),
+      videoSources: cleaned,
     };
   }
 
-  async getStreamSources(data: any): Promise<VideoSource[]> {
-    const requests = [
-      {
-        url: this.base + "/ajax/get_cdn_series/?t=" + Date.now(),
-        body:
-          "id=" +
-          encodeURIComponent(data.animeId) +
-          "&translator_id=" +
-          encodeURIComponent(data.translatorId) +
-          "&season=" +
-          encodeURIComponent(String(data.season)) +
-          "&episode=" +
-          encodeURIComponent(String(data.episode)) +
-          "&action=get_stream",
-      },
-      {
-        url: this.base + "/engine/ajax/get_cdn_series/?t=" + Date.now(),
-        body:
-          "id=" +
-          encodeURIComponent(data.animeId) +
-          "&translator_id=" +
-          encodeURIComponent(data.translatorId) +
-          "&season=" +
-          encodeURIComponent(String(data.season)) +
-          "&episode=" +
-          encodeURIComponent(String(data.episode)) +
-          "&action=get_stream",
-      },
+  async getStreamSources(data) {
+    const urls = [
+      this.base + "/ajax/get_cdn_series/?t=" + Date.now(),
+      this.base + "/engine/ajax/get_cdn_series/?t=" + Date.now(),
     ];
 
-    for (const req of requests) {
-      try {
-        const res = await fetch(req.url, {
-          method: "POST",
-          headers: {
-            ...this.headers,
-            Referer: data.url,
-          },
-          body: req.body,
-        });
+    const bodies = [
+      "id=" +
+        encodeURIComponent(data.animeId) +
+        "&translator_id=" +
+        encodeURIComponent(data.translatorId) +
+        "&season=" +
+        encodeURIComponent(String(data.season)) +
+        "&episode=" +
+        encodeURIComponent(String(data.episode)) +
+        "&action=get_stream",
+      "action=get_stream&id=" +
+        encodeURIComponent(data.animeId) +
+        "&translator_id=" +
+        encodeURIComponent(data.translatorId) +
+        "&season=" +
+        encodeURIComponent(String(data.season)) +
+        "&episode=" +
+        encodeURIComponent(String(data.episode)),
+    ];
 
-        if (!res.ok) {
-          continue;
-        }
+    for (const url of urls) {
+      for (const body of bodies) {
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: {
+              ...this.headers,
+              Referer: data.url,
+            },
+            body: body,
+          });
 
-        const text = await res.text();
-        const sources = this.extractSources(text);
+          if (!res.ok) {
+            continue;
+          }
 
-        if (sources.length > 0) {
-          return sources;
-        }
-      } catch (_) {}
+          const text = await res.text();
+          const sources = this.extractSources(text);
+
+          if (sources.length > 0) {
+            return sources;
+          }
+        } catch (_) {}
+      }
     }
 
     return [];
   }
 
-  extractSources(text: string): VideoSource[] {
-    const sources: VideoSource[] = [];
+  extractSources(text) {
+    const sources = [];
 
     try {
       const json = JSON.parse(text);
 
-      if (json.url) this.extractSourceString(json.url, sources);
-      if (json.file) this.extractSourceString(json.file, sources);
-      if (json.stream) this.extractSourceString(json.stream, sources);
-      if (json.sources) this.extractSourceValue(json.sources, sources);
+      if (json.url) {
+        this.extractSourceString(json.url, sources);
+      }
+
+      if (json.file) {
+        this.extractSourceString(json.file, sources);
+      }
+
+      if (json.stream) {
+        this.extractSourceString(json.stream, sources);
+      }
+
+      if (json.sources) {
+        this.extractSourceValue(json.sources, sources);
+      }
 
       if (sources.length > 0) {
         return this.dedupeSources(sources);
@@ -453,8 +443,10 @@ class Provider {
     return this.dedupeSources(sources);
   }
 
-  extractSourceValue(value: any, sources: VideoSource[]) {
-    if (!value) return;
+  extractSourceValue(value, sources) {
+    if (!value) {
+      return;
+    }
 
     if (typeof value === "string") {
       this.extractSourceString(value, sources);
@@ -462,7 +454,9 @@ class Provider {
     }
 
     if (Array.isArray(value)) {
-      for (const item of value) this.extractSourceValue(item, sources);
+      for (const item of value) {
+        this.extractSourceValue(item, sources);
+      }
       return;
     }
 
@@ -470,14 +464,20 @@ class Provider {
       const url = value.url || value.file || value.src || value.link;
       const quality = value.quality || value.label || value.resolution || "auto";
 
-      if (url) this.addSource(sources, url, quality);
+      if (url) {
+        this.addSource(sources, url, quality);
+      }
 
-      for (const key in value) this.extractSourceValue(value[key], sources);
+      for (const key in value) {
+        this.extractSourceValue(value[key], sources);
+      }
     }
   }
 
-  extractSourceString(value: string, sources: VideoSource[]) {
-    if (!value) return;
+  extractSourceString(value, sources) {
+    if (!value) {
+      return;
+    }
 
     value = this.decodeHtml(String(value))
       .replace(/\\\//g, "/")
@@ -490,29 +490,45 @@ class Provider {
     }
 
     const bracketRegex = /\[([^\]]+)\](https?:\/\/[^\s,\[\]]+)/g;
-    let bracketMatch: RegExpExecArray | null;
+    let bracketMatch;
 
     while ((bracketMatch = bracketRegex.exec(value)) !== null) {
       this.addSource(sources, bracketMatch[2], bracketMatch[1]);
     }
 
     const directRegex = /https?:\/\/[^"'\\\s,\[\]]+(?:\.m3u8|\.mp4)[^"'\\\s,\[\]]*/g;
-    let directMatch: RegExpExecArray | null;
+    let directMatch;
 
     while ((directMatch = directRegex.exec(value)) !== null) {
       this.addSource(sources, directMatch[0], "auto");
     }
 
     const fileRegex = /file\s*:\s*["']([^"']+)["']/gi;
-    let fileMatch: RegExpExecArray | null;
+    let fileMatch;
 
     while ((fileMatch = fileRegex.exec(value)) !== null) {
       this.addSource(sources, fileMatch[1], "auto");
     }
+
+    const videoRegex = /<video[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    let videoMatch;
+
+    while ((videoMatch = videoRegex.exec(value)) !== null) {
+      this.addSource(sources, videoMatch[1], "auto");
+    }
+
+    const sourceRegex = /<source[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    let sourceMatch;
+
+    while ((sourceMatch = sourceRegex.exec(value)) !== null) {
+      this.addSource(sources, sourceMatch[1], "auto");
+    }
   }
 
-  decodeStreamString(value: string): string {
-    if (!value) return "";
+  decodeStreamString(value) {
+    if (!value) {
+      return "";
+    }
 
     value = String(value)
       .replace(/\\\//g, "/")
@@ -529,7 +545,20 @@ class Provider {
       value = jsonUrlMatch[1].replace(/\\\//g, "/").replace(/\\/g, "");
     }
 
-    const trash = ["@#@!", "//_//", "^^^", "$$", "#h", "#2", "#3", "#4", "@", "!", "^"];
+    const trash = [
+      "@#@!",
+      "//_//",
+      "^^^",
+      "$$",
+      "#h",
+      "#2",
+      "#3",
+      "#4",
+      "@",
+      "!",
+      "^",
+    ];
+
     let cleaned = value;
 
     for (const item of trash) {
@@ -550,17 +579,25 @@ class Provider {
     return value;
   }
 
-  addSource(sources: VideoSource[], url: string, quality: string) {
-    if (!url) return;
+  addSource(sources, url, quality) {
+    if (!url) {
+      return;
+    }
 
     url = this.decodeHtml(String(url))
       .trim()
       .replace(/\\\//g, "/")
       .replace(/\\/g, "");
 
-    if (url.indexOf("http") !== 0) return;
+    if (url.indexOf("http") !== 0) {
+      return;
+    }
 
-    let type: VideoSourceType = "unknown";
+    if (sources.some((source) => source.url === url)) {
+      return;
+    }
+
+    let type = "unknown";
 
     if (url.indexOf(".m3u8") !== -1) {
       type = "m3u8";
@@ -568,39 +605,24 @@ class Provider {
       type = "mp4";
     }
 
-    const cleanQuality = this.cleanQuality(quality);
-
-    if (sources.some((source) => source.url === url && source.quality === cleanQuality)) {
-      return;
-    }
-
     sources.push({
       url: url,
-      quality: cleanQuality,
+      quality: String(quality || "auto"),
       type: type,
       subtitles: [],
     });
   }
 
-  cleanQuality(quality: string): string {
-    quality = String(quality || "auto").trim();
-
-    const match = quality.match(/(\d{3,4}p)/i);
-    if (match) return match[1];
-
-    if (/auto/i.test(quality)) return "auto";
-
-    return quality;
-  }
-
-  dedupeSources(sources: VideoSource[]): VideoSource[] {
-    const result: VideoSource[] = [];
-    const seen: { [key: string]: boolean } = {};
+  dedupeSources(sources) {
+    const result = [];
+    const seen = {};
 
     for (const source of sources) {
       const key = source.label + "|" + source.quality + "|" + source.url;
 
-      if (seen[key]) continue;
+      if (seen[key]) {
+        continue;
+      }
 
       seen[key] = true;
       result.push(source);
@@ -609,16 +631,19 @@ class Provider {
     return result;
   }
 
-  parseEpisodeId(episode: EpisodeDetails): any {
+  parseEpisodeId(episode) {
     try {
       const parsed = JSON.parse(episode.id);
-      if (parsed && parsed.url) return parsed;
+      if (parsed && parsed.url) {
+        return parsed;
+      }
     } catch (_) {}
 
     const url = this.normalizeUrl(episode.url || episode.id);
 
     return {
       url: url,
+      baseUrl: this.basePageUrl(url),
       animeId: this.extractAnimeId("", url),
       translatorId: this.extractTranslatorIdFromUrl(url) || "0",
       translatorName: "Default",
@@ -635,8 +660,10 @@ class Provider {
     };
   }
 
-  resolveUrl(id: string): string {
-    if (!id) throw new Error("Empty id");
+  resolveUrl(id) {
+    if (!id) {
+      throw new Error("Empty id");
+    }
 
     try {
       const parsed = JSON.parse(id);
@@ -657,29 +684,37 @@ class Provider {
     throw new Error("Invalid id. Expected URL from search result.");
   }
 
-  extractAnimeId(html: string, url: string): string {
+  extractAnimeId(html, url) {
     const dataIdMatch = String(html || "").match(/data-id=["'](\d+)["']/i);
 
-    if (dataIdMatch) return dataIdMatch[1];
+    if (dataIdMatch) {
+      return dataIdMatch[1];
+    }
 
-    const urlMatch = String(url).match(/\/(\d+)-[^/]+\.html/i);
+    const urlMatch = String(url || "").match(/\/(\d+)-[^/]+\.html/i);
 
-    if (urlMatch) return urlMatch[1];
+    if (urlMatch) {
+      return urlMatch[1];
+    }
 
     return "";
   }
 
-  extractTranslators(html: string, url: string): any[] {
-    const translators: any[] = [];
-    const seen: { [key: string]: boolean } = {};
+  extractTranslators(html, url) {
+    const translators = [];
+    const seen = {};
     const regex = /<[^>]+class=["'][^"']*b-translator__item[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi;
-    let match: RegExpExecArray | null;
+    let match;
 
     while ((match = regex.exec(html)) !== null) {
       const tag = match[0];
-      const id = this.getAttr(tag, "data-translator_id") || this.extractTranslatorIdFromUrl(tag);
+      const id =
+        this.getAttr(tag, "data-translator_id") ||
+        this.extractTranslatorIdFromUrl(tag);
 
-      if (!id || seen[id]) continue;
+      if (!id || seen[id]) {
+        continue;
+      }
 
       seen[id] = true;
 
@@ -689,7 +724,7 @@ class Provider {
       translators.push({
         id: id,
         name: name,
-        url: href ? this.absoluteUrl(href) : this.makeHashEpisodeUrl(url, id, 1, 1),
+        url: href ? this.absoluteUrl(href) : this.makeEpisodeUrl(url, id, 1, 1),
       });
     }
 
@@ -705,66 +740,142 @@ class Provider {
     return translators;
   }
 
-  extractTranslator(html: string, url: string): any {
+  extractActiveTranslator(html, url, translators) {
     const activeMatch =
-      String(html || "").match(/<[^>]+class=["'][^"']*b-translator__item[^"']*active[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/i) ||
-      String(html || "").match(/<[^>]+class=["'][^"']*b-translator__item[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/i);
+      String(html || "").match(/<[^>]+class=["'][^"']*b-translator__item[^"']*active[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/i);
 
     if (activeMatch) {
       const tag = activeMatch[0];
-      const id = this.getAttr(tag, "data-translator_id") || this.extractTranslatorIdFromUrl(url) || "0";
-      const name = this.cleanText(this.getAttr(tag, "title") || tag);
+      const id =
+        this.getAttr(tag, "data-translator_id") ||
+        this.extractTranslatorIdFromUrl(tag) ||
+        this.extractTranslatorIdFromUrl(url) ||
+        "0";
+
+      const name = this.cleanText(this.getAttr(tag, "title") || tag) || "Translator " + id;
 
       return {
         id: id,
-        name: name || "Default",
+        name: name,
+        url: this.getAttr(tag, "href") ? this.absoluteUrl(this.getAttr(tag, "href")) : url,
       };
     }
 
+    const urlTranslatorId = this.extractTranslatorIdFromUrl(url);
+
+    if (urlTranslatorId) {
+      for (const translator of translators) {
+        if (translator.id === urlTranslatorId) {
+          return translator;
+        }
+      }
+
+      return {
+        id: urlTranslatorId,
+        name: "Translator " + urlTranslatorId,
+        url: url,
+      };
+    }
+
+    if (translators.length > 0) {
+      return translators[0];
+    }
+
     return {
-      id: this.extractTranslatorIdFromUrl(url) || "0",
+      id: "0",
       name: "Default",
+      url: url,
     };
   }
 
-  makeHashEpisodeUrl(url: string, translatorId: string, season: number, episode: number): string {
-    return (
-      this.normalizeUrl(String(url || "").split("#")[0]) +
-      "#t:" +
-      translatorId +
-      "-s:" +
-      season +
-      "-e:" +
-      episode
-    );
+  extractHashEpisodes(html, pageUrl, animeId, translator, translators) {
+    const episodes = [];
+    const seen = {};
+    const regex = /#t:(\d+)-s:(\d+)-e:(\d+)/g;
+    let match;
+
+    while ((match = regex.exec(html)) !== null) {
+      const translatorId = match[1];
+      const season = parseInt(match[2], 10);
+      const episode = parseInt(match[3], 10);
+      const key = season + ":" + episode;
+
+      if (seen[key]) {
+        continue;
+      }
+
+      seen[key] = true;
+
+      const payload = {
+        url: this.makeEpisodeUrl(pageUrl, translatorId, season, episode),
+        baseUrl: this.basePageUrl(pageUrl),
+        animeId: animeId,
+        translatorId: translatorId,
+        translatorName: translator.id === translatorId ? translator.name : "Translator " + translatorId,
+        translators: translators,
+        season: season,
+        episode: episode,
+      };
+
+      episodes.push({
+        id: JSON.stringify(payload),
+        number: episode,
+        title: "Episode " + episode,
+        url: payload.url,
+      });
+    }
+
+    return episodes;
   }
 
-  extractTranslatorIdFromUrl(url: string): string {
-    const hashMatch = String(url).match(/#t:(\d+)/);
-    if (hashMatch) return hashMatch[1];
+  makeEpisodeUrl(url, translatorId, season, episode) {
+    const clean = this.normalizeUrl(String(url || "").split("#")[0]);
 
-    const pathMatch = String(url).match(/\/(\d+)-[^/]+(?:\/\d+-season(?:\/\d+-episode)?\.html|\.html)/i);
-    if (pathMatch) return pathMatch[1];
+    if (translatorId && translatorId !== "0") {
+      return clean + "#t:" + translatorId + "-s:" + season + "-e:" + episode;
+    }
+
+    return clean + "#s:" + season + "-e:" + episode;
+  }
+
+  basePageUrl(url) {
+    return this.normalizeUrl(String(url || "").split("#")[0]);
+  }
+
+  extractTranslatorIdFromUrl(url) {
+    const hashMatch = String(url || "").match(/#t:(\d+)/);
+
+    if (hashMatch) {
+      return hashMatch[1];
+    }
+
+    const pathMatch = String(url || "").match(/\/(\d+)-[^/]+(?:\/\d+-season(?:\/\d+-episode)?\.html|\.html)/i);
+
+    if (pathMatch) {
+      return pathMatch[1];
+    }
 
     return "";
   }
 
-  extractSeasonNumber(input: string): number {
+  extractSeasonNumber(input) {
     input = String(input || "");
 
     const match =
       input.match(/\/(\d+)-season/i) ||
-      input.match(/#t:\d+-s:(\d+)-e:\d+/i);
+      input.match(/#t:\d+-s:(\d+)-e:\d+/i) ||
+      input.match(/#s:(\d+)-e:\d+/i);
 
     return match ? parseInt(match[1], 10) : 0;
   }
 
-  extractEpisodeNumber(input: string): number {
+  extractEpisodeNumber(input) {
     input = String(input || "");
 
     const match =
       input.match(/\/(\d+)-episode/i) ||
       input.match(/#t:\d+-s:\d+-e:(\d+)/i) ||
+      input.match(/#s:\d+-e:(\d+)/i) ||
       input.match(/Серия\s+(\d+)/i) ||
       input.match(/Episode\s+(\d+)/i) ||
       input.match(/Epis[oó]dio\s+(\d+)/i);
@@ -772,30 +883,38 @@ class Provider {
     return match ? parseInt(match[1], 10) : 0;
   }
 
-  extractSeasonNumberFromHash(input: string): number {
-    const match = String(input || "").match(/#t:\d+-s:(\d+)-e:\d+/i);
+  extractSeasonNumberFromHash(input) {
+    const match =
+      String(input || "").match(/#t:\d+-s:(\d+)-e:\d+/i) ||
+      String(input || "").match(/#s:(\d+)-e:\d+/i);
+
     return match ? parseInt(match[1], 10) : 0;
   }
 
-  extractEpisodeNumberFromHash(input: string): number {
-    const match = String(input || "").match(/#t:\d+-s:\d+-e:(\d+)/i);
+  extractEpisodeNumberFromHash(input) {
+    const match =
+      String(input || "").match(/#t:\d+-s:\d+-e:(\d+)/i) ||
+      String(input || "").match(/#s:\d+-e:(\d+)/i);
+
     return match ? parseInt(match[1], 10) : 0;
   }
 
-  getAttr(input: string, name: string): string {
-    const regex = new RegExp(name + "=[\"']([^\"']+)[\"']", "i");
+  getAttr(input, name) {
+    const regex = new RegExp(name + '=["\']([^"\']+)["\']', "i");
     const match = String(input || "").match(regex);
     return match ? this.decodeHtml(match[1]) : "";
   }
 
-  toNumber(value: string): number {
-    if (!value) return 0;
+  toNumber(value) {
+    if (!value) {
+      return 0;
+    }
 
     const parsed = parseInt(value, 10);
     return Number.isFinite(parsed) ? parsed : 0;
   }
 
-  absoluteUrl(url: string): string {
+  absoluteUrl(url) {
     url = String(url || "");
 
     if (url.indexOf("http://") === 0 || url.indexOf("https://") === 0) {
@@ -809,7 +928,7 @@ class Provider {
     return this.base + "/" + url;
   }
 
-  normalizeUrl(url: string): string {
+  normalizeUrl(url) {
     return String(url || "")
       .replace("https://rezka.ag", this.base)
       .replace("https://rezka-ua.co", this.base)
@@ -817,7 +936,7 @@ class Provider {
       .replace("http://rezka-ua.co", this.base);
   }
 
-  cleanText(input: string): string {
+  cleanText(input) {
     return this.decodeHtml(
       String(input || "")
         .replace(/<[^>]+>/g, " ")
@@ -826,7 +945,7 @@ class Provider {
     );
   }
 
-  decodeHtml(input: string): string {
+  decodeHtml(input) {
     return String(input || "")
       .replace(/&amp;/g, "&")
       .replace(/&quot;/g, '"')
