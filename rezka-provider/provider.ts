@@ -129,28 +129,37 @@ class Provider {
     }
 
     const html = await res.text();
+    const $ = LoadDoc(html);
+
     const animeId = this.extractAnimeId(html, url);
     const translators = this.extractTranslators(html, url);
     const activeTranslator = this.extractActiveTranslator(html, url, translators);
+
+    const translatorId =
+      activeTranslator.id ||
+      this.extractTranslatorIdFromUrl(url) ||
+      (translators.length > 0 ? translators[0].id : "0");
+
+    const translatorName =
+      activeTranslator.name ||
+      (translators.length > 0 ? translators[0].name : "Default");
+
     const episodes = [];
     const seen = {};
 
-    const addEpisode = (attrs, text, href) => {
-      const episodeNumber =
-        this.toNumber(this.getAttr(attrs, "data-episode_id")) ||
-        this.extractEpisodeNumber(text) ||
-        this.extractEpisodeNumber(href);
+    const pushEpisode = (seasonNumber, episodeNumber, href, dataId, text) => {
+      seasonNumber = this.toNumber(seasonNumber) || 1;
+      episodeNumber = this.toNumber(episodeNumber);
+
+      if (!episodeNumber) {
+        episodeNumber =
+          this.extractEpisodeNumber(text) ||
+          this.extractEpisodeNumber(href);
+      }
 
       if (!episodeNumber) {
         return;
       }
-
-      const seasonNumber =
-        this.toNumber(this.getAttr(attrs, "data-season_id")) ||
-        this.extractSeasonNumber(href) ||
-        this.extractSeasonNumber(url) ||
-        this.extractSeasonNumberFromHash(url) ||
-        1;
 
       const key = seasonNumber + ":" + episodeNumber;
 
@@ -160,21 +169,14 @@ class Provider {
 
       seen[key] = true;
 
-      const translatorId =
-        activeTranslator.id ||
-        this.extractTranslatorIdFromUrl(url) ||
-        (translators.length > 0 ? translators[0].id : "0");
-
-      const translatorName =
-        activeTranslator.name ||
-        (translators.length > 0 ? translators[0].name : "Default");
-
-      const epUrl = this.makeEpisodeUrl(url, translatorId, seasonNumber, episodeNumber);
+      const epUrl = href
+        ? this.absoluteUrl(href)
+        : this.makeEpisodeUrl(url, translatorId, seasonNumber, episodeNumber);
 
       const payload = {
         url: epUrl,
         baseUrl: this.basePageUrl(url),
-        animeId: this.getAttr(attrs, "data-id") || animeId,
+        animeId: dataId || animeId,
         translatorId: translatorId,
         translatorName: translatorName,
         translators: translators,
@@ -185,35 +187,83 @@ class Provider {
       episodes.push({
         id: JSON.stringify(payload),
         number: episodeNumber,
-        title: "Episode " + episodeNumber,
+        title:
+          seasonNumber > 1
+            ? "Season " + seasonNumber + " Episode " + episodeNumber
+            : "Episode " + episodeNumber,
         url: epUrl,
+        _season: seasonNumber,
+        _episode: episodeNumber,
       });
     };
 
-    const itemRegex = /<(?:li|a)\b([^>]*class=["'][^"']*b-simple_episode__item[^"']*["'][^>]*)>([\s\S]*?)<\/(?:li|a)>/gi;
-    let itemMatch;
+    $(".b-simple_episode__item").each((_, el) => {
+      const attrs = String(el.toString ? el.toString() : "");
 
-    while ((itemMatch = itemRegex.exec(html)) !== null) {
-      addEpisode(itemMatch[1], this.cleanText(itemMatch[2]), this.getAttr(itemMatch[1], "href"));
-    }
+      const season =
+        el.attr("data-season_id") ||
+        el.attr("data-season-id") ||
+        this.getAttr(attrs, "data-season_id") ||
+        this.getAttr(attrs, "data-season-id");
 
-    const dataRegex = /<[^>]*data-id=["']\d+["'][^>]*data-season_id=["']\d+["'][^>]*data-episode_id=["']\d+["'][^>]*>/gi;
-    let dataMatch;
+      const episode =
+        el.attr("data-episode_id") ||
+        el.attr("data-episode-id") ||
+        this.getAttr(attrs, "data-episode_id") ||
+        this.getAttr(attrs, "data-episode-id");
 
-    while ((dataMatch = dataRegex.exec(html)) !== null) {
-      addEpisode(dataMatch[0], "", this.getAttr(dataMatch[0], "href"));
-    }
+      const dataId =
+        el.attr("data-id") ||
+        this.getAttr(attrs, "data-id") ||
+        animeId;
 
-    const dataRegexAlt = /<[^>]*data-episode_id=["']\d+["'][^>]*data-season_id=["']\d+["'][^>]*data-id=["']\d+["'][^>]*>/gi;
-    let dataAltMatch;
+      const href =
+        el.attr("href") ||
+        this.getAttr(attrs, "href");
 
-    while ((dataAltMatch = dataRegexAlt.exec(html)) !== null) {
-      addEpisode(dataAltMatch[0], "", this.getAttr(dataAltMatch[0], "href"));
+      const text = this.cleanText(el.text ? el.text() : attrs);
+
+      pushEpisode(season, episode, href, dataId, text);
+    });
+
+    if (episodes.length === 0) {
+      const itemRegex =
+        /<[^>]*class=["'][^"']*b-simple_episode__item[^"']*["'][^>]*>/gi;
+
+      let match;
+
+      while ((match = itemRegex.exec(html)) !== null) {
+        const tag = match[0];
+
+        pushEpisode(
+          this.getAttr(tag, "data-season_id") || this.getAttr(tag, "data-season-id"),
+          this.getAttr(tag, "data-episode_id") || this.getAttr(tag, "data-episode-id"),
+          this.getAttr(tag, "href"),
+          this.getAttr(tag, "data-id") || animeId,
+          tag
+        );
+      }
     }
 
     if (episodes.length === 0) {
-      const hashEpisodes = this.extractHashEpisodes(html, url, animeId, activeTranslator, translators);
+      const hashEpisodes = this.extractHashEpisodes(
+        html,
+        url,
+        animeId,
+        activeTranslator,
+        translators
+      );
+
       for (const ep of hashEpisodes) {
+        try {
+          const payload = JSON.parse(ep.id);
+          ep._season = payload.season || 1;
+          ep._episode = payload.episode || ep.number;
+        } catch (_) {
+          ep._season = 1;
+          ep._episode = ep.number;
+        }
+
         episodes.push(ep);
       }
     }
@@ -229,16 +279,12 @@ class Provider {
         this.extractEpisodeNumberFromHash(url) ||
         1;
 
-      const translatorId =
-        activeTranslator.id ||
-        this.extractTranslatorIdFromUrl(url) ||
-        (translators.length > 0 ? translators[0].id : "0");
-
-      const translatorName =
-        activeTranslator.name ||
-        (translators.length > 0 ? translators[0].name : "Default");
-
-      const epUrl = this.makeEpisodeUrl(url, translatorId, seasonNumber, episodeNumber);
+      const epUrl = this.makeEpisodeUrl(
+        url,
+        translatorId,
+        seasonNumber,
+        episodeNumber
+      );
 
       const payload = {
         url: epUrl,
@@ -253,15 +299,33 @@ class Provider {
 
       episodes.push({
         id: JSON.stringify(payload),
-        number: episodeNumber,
-        title: "Episode " + episodeNumber,
+        number: 1,
+        title: "Episode 1",
         url: epUrl,
+        _season: seasonNumber,
+        _episode: episodeNumber,
       });
     }
 
-    episodes.sort((a, b) => a.number - b.number);
+    episodes.sort((a, b) => {
+      const seasonA = a._season || 1;
+      const seasonB = b._season || 1;
 
-    return episodes;
+      if (seasonA !== seasonB) {
+        return seasonA - seasonB;
+      }
+
+      return (a._episode || a.number) - (b._episode || b.number);
+    });
+
+    for (let i = 0; i < episodes.length; i++) {
+      episodes[i].number = i + 1;
+
+      delete episodes[i]._season;
+      delete episodes[i]._episode;
+    }
+
+    return episodes.filter((episode) => Number.isInteger(episode.number));
   }
 
   async findEpisodeServer(episodeOrId, server) {
