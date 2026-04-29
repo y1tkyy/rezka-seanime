@@ -334,7 +334,7 @@ class Provider {
 
     if (translators.length === 0) {
       try {
-        const res = await fetch(data.url, {
+        const res = await fetch(data.baseUrl || data.url, {
           headers: {
             ...this.headers,
             Referer: this.base + "/",
@@ -343,7 +343,7 @@ class Provider {
 
         if (res.ok) {
           const html = await res.text();
-          translators = this.extractTranslators(html, data.url);
+          translators = this.extractTranslators(html, data.baseUrl || data.url);
         }
       } catch (_) {}
     }
@@ -361,13 +361,15 @@ class Provider {
     const videoSources = [];
 
     for (const translator of translators) {
-      if (!translator.id || translator.id === "0") {
+      const translatorId = translator.id || data.translatorId;
+
+      if (!translatorId || translatorId === "0") {
         continue;
       }
 
       const episodeUrl = this.makeEpisodeUrl(
-        translator.url || data.url,
-        translator.id,
+        data.baseUrl || translator.url || data.url,
+        translatorId,
         data.season,
         data.episode
       );
@@ -376,8 +378,8 @@ class Provider {
         url: episodeUrl,
         baseUrl: data.baseUrl || this.basePageUrl(data.url),
         animeId: data.animeId,
-        translatorId: translator.id,
-        translatorName: translator.name,
+        translatorId: translatorId,
+        translatorName: translator.name || "Translator " + translatorId,
         season: data.season,
         episode: data.episode,
       };
@@ -385,23 +387,25 @@ class Provider {
       const sources = await this.getStreamSources(translatorData);
 
       for (const source of sources) {
-        const quality = this.normalizeQuality(source.quality);
+        const sourceQuality = this.normalizeQuality(source.quality);
 
-        if (!quality || this.isBadQuality(quality)) {
+        if (!sourceQuality || this.isBadQuality(sourceQuality)) {
           continue;
         }
 
+        const translatorName = translator.name || "Translator " + translatorId;
+
         videoSources.push({
           url: source.url,
-          type: source.type,
-          quality: translator.name + " - " + quality,
-          label: translator.name,
-          subtitles: [],
+          type: source.type || this.detectVideoType(source.url),
+          quality: translatorName + " - " + sourceQuality,
+          label: translatorName,
+          subtitles: source.subtitles || [],
         });
       }
     }
 
-    const cleaned = this.dedupeSources(videoSources);
+    const cleaned = this.dedupeVideoSourcesPreserveQuality(videoSources);
 
     if (cleaned.length === 0) {
       throw new Error("No video sources found");
@@ -728,20 +732,82 @@ class Provider {
       return;
     }
 
-    let type = "unknown";
-
-    if (url.indexOf(".m3u8") !== -1) {
-      type = "m3u8";
-    } else if (url.indexOf(".mp4") !== -1) {
-      type = "mp4";
-    }
-
     sources.push({
       url: url,
       quality: quality,
-      type: type,
+      type: this.detectVideoType(url),
       subtitles: [],
     });
+  }
+
+  dedupeVideoSourcesPreserveQuality(sources) {
+    const result = [];
+    const seen = {};
+
+    for (const source of sources) {
+      if (!source || !source.url || !source.quality) {
+        continue;
+      }
+
+      if (this.isPremiumUrl(source.url)) {
+        continue;
+      }
+
+      const quality = this.cleanText(source.quality).trim();
+      const label = this.cleanText(source.label || "").trim();
+      const key = quality + "|" + source.url;
+
+      if (seen[key]) {
+        continue;
+      }
+
+      seen[key] = true;
+
+      result.push({
+        url: source.url,
+        type: source.type || this.detectVideoType(source.url),
+        quality: quality,
+        label: label || undefined,
+        subtitles: source.subtitles || [],
+      });
+    }
+
+    result.sort((a, b) => {
+      const qa = this.qualityRank(a.quality);
+      const qb = this.qualityRank(b.quality);
+
+      if (qa !== qb) {
+        return qb - qa;
+      }
+
+      return String(a.quality).localeCompare(String(b.quality));
+    });
+
+    return result;
+  }
+
+  qualityRank(value) {
+    const match = String(value || "").match(/(2160p|1440p|1080p|720p|480p|360p|240p)/i);
+
+    if (!match) {
+      return 0;
+    }
+
+    return parseInt(match[1], 10);
+  }
+
+  detectVideoType(url) {
+    url = String(url || "");
+
+    if (url.indexOf(".m3u8") !== -1) {
+      return "m3u8";
+    }
+
+    if (url.indexOf(".mp4") !== -1) {
+      return "mp4";
+    }
+
+    return "unknown";
   }
 
   normalizeQuality(quality) {
