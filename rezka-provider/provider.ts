@@ -804,7 +804,7 @@ class Provider {
       return String(a.quality).localeCompare(String(b.quality));
     });
 
-    return result.map((source) => ({
+    return result.reverse().map((source) => ({
       url: source.url,
       type: source.type,
       quality: source.quality,
