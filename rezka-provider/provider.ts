@@ -1404,27 +1404,13 @@ class Provider {
       return String(a.quality).localeCompare(String(b.quality));
     });
 
-    const cleaned = result.map((source) => ({
+    return result.reverse().map((source) => ({
       url: source.url,
-      type: source.type,
+      type: source.type || this.detectVideoType(source.url),
       quality: source.quality,
       label: source.label,
       subtitles: source.subtitles || [],
     }));
-
-    const translatorKeys = {};
-
-    for (const source of result) {
-      translatorKeys[String(source._translatorIndex)] = true;
-    }
-
-    const translatorCount = Object.keys(translatorKeys).length;
-
-    if (translatorCount <= 1) {
-      return cleaned;
-    }
-
-    return [cleaned[0]].concat(cleaned.slice(1).reverse());
   }
 
   qualityRank(value) {
