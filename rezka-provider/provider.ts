@@ -427,15 +427,8 @@ class Provider {
       }
     }
 
-    const inlineSources = await this.getInlineSeriesPageSources(data);
-
-    if (inlineSources.length > 0) {
-      return inlineSources;
-    }
-
     const urls = [
       this.base + "/ajax/get_cdn_series/?t=" + Date.now(),
-      this.base + "/engine/ajax/get_cdn_series/?t=" + Date.now(),
     ];
 
     const bodies = [
@@ -448,14 +441,6 @@ class Provider {
         "&episode=" +
         encodeURIComponent(String(data.episode)) +
         "&action=get_stream",
-      "action=get_stream&id=" +
-        encodeURIComponent(data.animeId) +
-        "&translator_id=" +
-        encodeURIComponent(data.translatorId) +
-        "&season=" +
-        encodeURIComponent(String(data.season)) +
-        "&episode=" +
-        encodeURIComponent(String(data.episode)),
     ];
 
     for (const url of urls) {
@@ -465,7 +450,8 @@ class Provider {
             method: "POST",
             headers: {
               ...this.headers,
-              Referer: data.url,
+              Origin: this.base,
+              Referer: data.baseUrl || data.url || this.base + "/",
             },
             body: body,
           });
@@ -482,6 +468,12 @@ class Provider {
           }
         } catch (_) {}
       }
+    }
+
+    const inlineSources = await this.getInlineSeriesPageSources(data);
+
+    if (inlineSources.length > 0) {
+      return inlineSources;
     }
 
     return [];
@@ -516,10 +508,7 @@ class Provider {
         return [];
       }
 
-      const sources = [];
-      this.extractSourceString(init.streams, sources);
-
-      return this.dedupeSources(sources);
+      return this.extractRezkaStreamSources(init.streams);
     } catch (_) {
       return [];
     }
@@ -528,51 +517,225 @@ class Provider {
   extractInitCDNSeriesData(html) {
     html = String(html || "");
 
-    const initMatch = html.match(
-      /initCDNSeriesEvents\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,[\s\S]*?(\{[\s\S]*?\})\s*\)\s*;/i
-    );
+    const marker = "initCDNSeriesEvents(";
+    const index = html.indexOf(marker);
 
-    if (!initMatch) {
+    if (index === -1) {
       return null;
     }
 
-    const animeId = initMatch[1];
-    const translatorId = initMatch[2];
-    const season = initMatch[3];
-    const episode = initMatch[4];
-    const objectText = initMatch[5];
+    let i = index + marker.length;
+    let depth = 1;
+    let quote = "";
+    let escaped = false;
+
+    while (i < html.length) {
+      const ch = html[i];
+
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (quote) {
+        if (ch === quote) quote = "";
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === "(") {
+        depth++;
+      } else if (ch === ")") {
+        depth--;
+
+        if (depth === 0) {
+          break;
+        }
+      }
+
+      i++;
+    }
+
+    const rawArgs = html.slice(index + marker.length, i);
+    const args = this.splitTopLevelArgs(rawArgs);
+
+    if (args.length < 9) {
+      return null;
+    }
+
+    const animeId = args[0];
+    const translatorId = args[1];
+    const season = args[2];
+    const episode = args[3];
+    const objectText = args[8];
+
+    let streams = "";
+    let defaultQuality = "";
 
     try {
       const obj = JSON.parse(objectText);
+      streams = obj.streams || "";
+      defaultQuality = obj.default_quality || "";
+    } catch (_) {
+      const streamsMatch = objectText.match(/"streams"\s*:\s*"((?:\\"|\\.|[^"])*)"/i);
+      const defaultQualityMatch = objectText.match(/"default_quality"\s*:\s*"([^"]*)"/i);
 
-      return {
-        animeId: animeId,
-        translatorId: translatorId,
-        season: season,
-        episode: episode,
-        streams: obj.streams || "",
-        defaultQuality: obj.default_quality || "",
-      };
-    } catch (_) {}
+      if (streamsMatch) {
+        streams = streamsMatch[1];
+      }
 
-    const streamsMatch = objectText.match(/"streams"\s*:\s*"((?:\\"|[^"])*)"/i);
-    const defaultQualityMatch = objectText.match(/"default_quality"\s*:\s*"([^"]*)"/i);
+      if (defaultQualityMatch) {
+        defaultQuality = defaultQualityMatch[1];
+      }
+    }
 
-    if (!streamsMatch) {
+    streams = this.decodeRezkaEscapedString(streams);
+
+    if (!streams) {
       return null;
     }
 
     return {
-      animeId: animeId,
-      translatorId: translatorId,
-      season: season,
-      episode: episode,
-      streams: streamsMatch[1]
-        .replace(/\\"/g, '"')
-        .replace(/\\\//g, "/")
-        .replace(/\\\\/g, "\\"),
-      defaultQuality: defaultQualityMatch ? defaultQualityMatch[1] : "",
+      animeId: String(animeId).trim(),
+      translatorId: String(translatorId).trim(),
+      season: String(season).trim(),
+      episode: String(episode).trim(),
+      streams: streams,
+      defaultQuality: defaultQuality,
     };
+  }
+
+  splitTopLevelArgs(input) {
+    const args = [];
+    let current = "";
+    let depthCurly = 0;
+    let depthSquare = 0;
+    let quote = "";
+    let escaped = false;
+
+    input = String(input || "");
+
+    for (let i = 0; i < input.length; i++) {
+      const ch = input[i];
+
+      if (escaped) {
+        current += ch;
+        escaped = false;
+        continue;
+      }
+
+      if (ch === "\\") {
+        current += ch;
+        escaped = true;
+        continue;
+      }
+
+      if (quote) {
+        current += ch;
+
+        if (ch === quote) {
+          quote = "";
+        }
+
+        continue;
+      }
+
+      if (ch === '"' || ch === "'") {
+        current += ch;
+        quote = ch;
+        continue;
+      }
+
+      if (ch === "{") depthCurly++;
+      if (ch === "}") depthCurly--;
+      if (ch === "[") depthSquare++;
+      if (ch === "]") depthSquare--;
+
+      if (ch === "," && depthCurly === 0 && depthSquare === 0) {
+        args.push(current.trim());
+        current = "";
+        continue;
+      }
+
+      current += ch;
+    }
+
+    if (current.trim()) {
+      args.push(current.trim());
+    }
+
+    return args;
+  }
+
+  decodeRezkaEscapedString(value) {
+    return String(value || "")
+      .replace(/\\\//g, "/")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
+
+  extractRezkaStreamSources(streams) {
+    streams = this.decodeRezkaEscapedString(streams);
+    streams = this.removePremiumParts(streams);
+
+    const sources = [];
+    const seenQuality = {};
+    const blocks = streams.split(/,(?=\[\d{3,4}p\]|\[auto\])/i);
+
+    for (const block of blocks) {
+      const match = block.match(/\[([^\]]+)\]([\s\S]+)/);
+
+      if (!match) {
+        continue;
+      }
+
+      const quality = this.normalizeQuality(match[1]);
+
+      if (!quality || this.isBadQuality(quality)) {
+        continue;
+      }
+
+      if (seenQuality[quality]) {
+        continue;
+      }
+
+      const urls = [];
+      const urlRegex = /https?:\/\/[^\s,\[\]]+/g;
+      let urlMatch;
+
+      while ((urlMatch = urlRegex.exec(match[2])) !== null) {
+        let url = this.decodeRezkaEscapedString(urlMatch[0]).trim();
+
+        url = url.replace(/[)"']+$/g, "");
+
+        if (!url || this.isPremiumUrl(url)) {
+          continue;
+        }
+
+        if (url.indexOf(".m3u8") === -1 && url.indexOf(":hls:manifest") === -1) {
+          continue;
+        }
+
+        urls.push(url);
+      }
+
+      if (urls.length === 0) {
+        continue;
+      }
+
+      urls.sort((a, b) => {
+        const au = /ukrtelcdn/i.test(a) ? 1 : 0;
+        const bu = /ukrtelcdn/i.test(b) ? 1 : 0;
+
+        if (au !== bu) {
+          return bu - au;
+        }
+
+        return a.localeCompare(b);
+      });
+
+      seenQuality[quality] = true;
+      this.addSource(sources, urls[0], quality);
+    }
+
+    return this.dedupeSources(sources);
   }
 
   async getMoviePageSources(data) {
@@ -723,7 +886,16 @@ class Provider {
     try {
       const json = JSON.parse(text);
 
-      if (json.url) this.extractSourceString(json.url, sources);
+      if (json.url) {
+        const rezkaSources = this.extractRezkaStreamSources(json.url);
+
+        if (rezkaSources.length > 0) {
+          return rezkaSources;
+        }
+
+        this.extractSourceString(json.url, sources);
+      }
+
       if (json.file) this.extractSourceString(json.file, sources);
       if (json.stream) this.extractSourceString(json.stream, sources);
       if (json.sources) this.extractSourceValue(json.sources, sources);
@@ -734,7 +906,19 @@ class Provider {
     const decoded = this.decodeStreamString(text);
 
     if (decoded && decoded !== text) {
+      const rezkaSources = this.extractRezkaStreamSources(decoded);
+
+      if (rezkaSources.length > 0) {
+        return rezkaSources;
+      }
+
       this.extractSourceString(decoded, sources);
+    }
+
+    const rezkaSources = this.extractRezkaStreamSources(text);
+
+    if (rezkaSources.length > 0) {
+      return rezkaSources;
     }
 
     this.extractSourceString(text, sources);
@@ -1069,7 +1253,7 @@ class Provider {
   detectVideoType(url) {
     url = String(url || "");
 
-    if (url.indexOf(".m3u8") !== -1) {
+    if (url.indexOf(".m3u8") !== -1 || url.indexOf(":hls:manifest") !== -1) {
       return "m3u8";
     }
 
