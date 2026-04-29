@@ -353,7 +353,8 @@ class Provider {
 
     const videoSources = [];
 
-    for (const translator of translators) {
+    for (let i = 0; i < translators.length; i++) {
+      const translator = translators[i];
       const translatorId = translator.id || data.translatorId;
 
       if (!translatorId || translatorId === "0") {
@@ -400,7 +401,7 @@ class Provider {
           _translatorIndex:
             typeof translator.index === "number"
               ? translator.index
-              : translators.indexOf(translator),
+              : i,
           _qualityRank: this.qualityRank(sourceQuality),
         });
       }
@@ -454,8 +455,6 @@ class Provider {
       "&action=get_stream";
 
     try {
-      console.log("Rezka AJAX body", body);
-
       const res = await fetch(url, {
         method: "POST",
         headers: {
@@ -466,19 +465,15 @@ class Provider {
         body: body,
       });
 
-      const text = await res.text();
-      console.log("Rezka AJAX response start", text.slice(0, 500));
-
       if (res.ok) {
+        const text = await res.text();
         const sources = this.extractSources(text);
 
         if (sources.length > 0) {
           return sources;
         }
       }
-    } catch (e) {
-      console.error("Rezka AJAX failed", e);
-    }
+    } catch (_) {}
 
     return [];
   }
@@ -499,29 +494,7 @@ class Provider {
       const html = await res.text();
       const inits = this.extractAllInitCDNSeriesData(html);
 
-      console.log("Inline init count", inits.length);
-      console.log(
-        "Requested stream data",
-        JSON.stringify({
-          animeId: data.animeId,
-          translatorId: data.translatorId,
-          season: data.season,
-          episode: data.episode,
-        })
-      );
-
       for (const init of inits) {
-        console.log(
-          "Inline init item",
-          JSON.stringify({
-            animeId: init.animeId,
-            translatorId: init.translatorId,
-            season: init.season,
-            episode: init.episode,
-            streamsLen: init.streams.length,
-          })
-        );
-
         if (
           this.toNumber(init.animeId) === this.toNumber(data.animeId) &&
           this.toNumber(init.translatorId) === this.toNumber(data.translatorId) &&
@@ -533,8 +506,7 @@ class Provider {
       }
 
       return [];
-    } catch (e) {
-      console.error("Inline series extraction failed", e);
+    } catch (_) {
       return [];
     }
   }
@@ -560,13 +532,16 @@ class Provider {
           this.toNumber(init.animeId) === this.toNumber(data.animeId) &&
           this.toNumber(init.translatorId) === this.toNumber(data.translatorId)
         ) {
-          return this.extractRezkaStreamSources(init.streams);
+          const sources = this.extractRezkaStreamSources(init.streams);
+
+          if (sources.length > 0) {
+            return sources;
+          }
         }
       }
 
       return [];
-    } catch (e) {
-      console.error("Inline movie extraction failed", e);
+    } catch (_) {
       return [];
     }
   }
@@ -639,19 +614,22 @@ class Provider {
       }
 
       const args = this.splitTopLevelArgs(rawArgs);
-      const animeId = args[0];
-      const translatorId = args[1];
-      const objectText = args[args.length - 1];
-      const streams = this.extractJsonStringValue(objectText, "streams");
-      const defaultQuality = this.extractJsonStringValue(objectText, "default_quality");
 
-      if (streams) {
-        results.push({
-          animeId: String(animeId).trim(),
-          translatorId: String(translatorId).trim(),
-          streams: streams,
-          defaultQuality: defaultQuality || "",
-        });
+      if (args.length >= 2) {
+        const animeId = args[0];
+        const translatorId = args[1];
+        const objectText = args[args.length - 1];
+        const streams = this.extractJsonStringValue(objectText, "streams");
+        const defaultQuality = this.extractJsonStringValue(objectText, "default_quality");
+
+        if (streams) {
+          results.push({
+            animeId: String(animeId).trim(),
+            translatorId: String(translatorId).trim(),
+            streams: streams,
+            defaultQuality: defaultQuality || "",
+          });
+        }
       }
 
       start = index + marker.length + rawArgs.length;
@@ -829,7 +807,6 @@ class Provider {
 
     const sources = [];
     const seenQuality = {};
-
     const blocks = streams.split(/,(?=\[(?:2160p|1440p|1080p|720p|480p|360p|240p|auto)\])/i);
 
     for (const block of blocks) {
@@ -884,16 +861,6 @@ class Provider {
       this.addSource(sources, urls[0], quality);
     }
 
-    console.log(
-      "Extracted Rezka sources",
-      JSON.stringify(
-        sources.map((s) => ({
-          quality: s.quality,
-          url: s.url.slice(0, 80),
-        }))
-      )
-    );
-
     return this.dedupeSources(sources);
   }
 
@@ -902,6 +869,12 @@ class Provider {
 
     if (inlineMovieSources.length > 0) {
       return inlineMovieSources;
+    }
+
+    const browserSources = await this.getMoviePageSourcesWithBrowser(data);
+
+    if (browserSources.length > 1) {
+      return browserSources;
     }
 
     try {
@@ -914,6 +887,21 @@ class Provider {
 
       if (res.ok) {
         const html = await res.text();
+        const inits = this.extractAllInitCDNMoviesData(html);
+
+        for (const init of inits) {
+          if (
+            this.toNumber(init.animeId) === this.toNumber(data.animeId) &&
+            this.toNumber(init.translatorId) === this.toNumber(data.translatorId)
+          ) {
+            const sources = this.extractRezkaStreamSources(init.streams);
+
+            if (sources.length > 0) {
+              return sources;
+            }
+          }
+        }
+
         const sources = [];
         const directVideoRegex = /<video[^>]+src=["']([^"']+(?:\.m3u8|\.mp4)[^"']*)["'][^>]*>/gi;
         let directVideoMatch;
@@ -936,7 +924,7 @@ class Provider {
       }
     } catch (_) {}
 
-    return await this.getMoviePageSourcesWithBrowser(data);
+    return browserSources;
   }
 
   async getMoviePageSourcesWithBrowser(data) {
@@ -960,10 +948,6 @@ class Provider {
           .map(s => s.src || s.getAttribute("src") || "")
           .filter(Boolean);
 
-        const iframes = Array.from(document.querySelectorAll("iframe"))
-          .map(i => i.src || i.getAttribute("src") || "")
-          .filter(Boolean);
-
         const qualityText = clean(
           Array.from(document.querySelectorAll("#cdnplayer_settings, [fid='1'], pjsdiv"))
             .map(el => el.textContent)
@@ -975,7 +959,6 @@ class Provider {
         return JSON.stringify({
           videos,
           sources,
-          iframes,
           quality: qualityMatch ? qualityMatch[1] : "auto",
           html: document.documentElement.outerHTML
         });
@@ -985,15 +968,6 @@ class Provider {
       browser = null;
 
       const parsed = JSON.parse(result || "{}");
-      const sources = [];
-      const quality = parsed.quality || "auto";
-      const urls = []
-        .concat(parsed.videos || [])
-        .concat(parsed.sources || []);
-
-      for (const url of urls) {
-        this.addSource(sources, url, quality);
-      }
 
       if (parsed.html) {
         const movieInits = this.extractAllInitCDNMoviesData(parsed.html);
@@ -1012,6 +986,16 @@ class Provider {
         }
       }
 
+      const sources = [];
+      const quality = parsed.quality || "auto";
+      const urls = []
+        .concat(parsed.videos || [])
+        .concat(parsed.sources || []);
+
+      for (const url of urls) {
+        this.addSource(sources, url, quality);
+      }
+
       if (parsed.html) {
         const html = String(parsed.html);
         const videoRegex = /<video[^>]+src=["']([^"']+(?:\.m3u8|\.mp4)[^"']*)["'][^>]*>/gi;
@@ -1025,14 +1009,13 @@ class Provider {
       }
 
       return this.dedupeSources(sources);
-    } catch (e) {
+    } catch (_) {
       try {
         if (browser) {
           await browser.close();
         }
       } catch (_) {}
 
-      console.error("Movie ChromeDP extraction failed", e);
       return [];
     }
   }
@@ -1371,7 +1354,17 @@ class Provider {
         continue;
       }
 
-      const key = quality + "|" + source.url;
+      const translatorIndex =
+        typeof source._translatorIndex === "number"
+          ? source._translatorIndex
+          : 9999;
+
+      const qualityRank =
+        typeof source._qualityRank === "number"
+          ? source._qualityRank
+          : this.qualityRank(quality);
+
+      const key = translatorIndex + "|" + label + "|" + quality + "|" + source.url;
 
       if (seen[key]) {
         continue;
@@ -1385,14 +1378,8 @@ class Provider {
         quality: quality,
         label: label || undefined,
         subtitles: source.subtitles || [],
-        _translatorIndex:
-          typeof source._translatorIndex === "number"
-            ? source._translatorIndex
-            : 9999,
-        _qualityRank:
-          typeof source._qualityRank === "number"
-            ? source._qualityRank
-            : this.qualityRank(quality),
+        _translatorIndex: translatorIndex,
+        _qualityRank: qualityRank,
       });
     }
 
@@ -1408,9 +1395,7 @@ class Provider {
       return String(a.quality).localeCompare(String(b.quality));
     });
 
-    const fixed = result.reverse();
-
-    return fixed.map((source) => ({
+    return result.map((source) => ({
       url: source.url,
       type: source.type,
       quality: source.quality,
@@ -1525,12 +1510,23 @@ class Provider {
 
       result.push({
         url: source.url,
-        type: source.type,
+        type: source.type || this.detectVideoType(source.url),
         quality: quality,
         label: source.label,
         subtitles: source.subtitles || [],
       });
     }
+
+    result.sort((a, b) => {
+      const qa = this.qualityRank(a.quality);
+      const qb = this.qualityRank(b.quality);
+
+      if (qa !== qb) {
+        return qb - qa;
+      }
+
+      return String(a.quality).localeCompare(String(b.quality));
+    });
 
     return result;
   }
@@ -1736,15 +1732,15 @@ class Provider {
         this.extractTranslatorIdFromUrl(tag) ||
         this.extractTranslatorIdFromUrl(url);
 
-      const name =
-        this.cleanText(this.getAttr(tag, "title") || tag) ||
-        "Translator " + id;
-
       for (const translator of translators) {
         if (translator.id === id) {
           return translator;
         }
       }
+
+      const name =
+        this.cleanText(this.getAttr(tag, "title") || tag) ||
+        "Translator " + id;
 
       return {
         id: id,
