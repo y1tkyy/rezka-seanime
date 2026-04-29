@@ -884,7 +884,7 @@ class Provider {
   }
 
   getAttr(input, name) {
-    const regex = new RegExp(name + '=["\\']([^"\\']+)["\\']', "i");
+    const regex = new RegExp(name + "=[\"']([^\"']+)[\"']", "i");
     const match = String(input || "").match(regex);
     return match ? this.decodeHtml(match[1]) : "";
   }
