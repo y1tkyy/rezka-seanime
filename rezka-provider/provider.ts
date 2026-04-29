@@ -360,8 +360,7 @@ class Provider {
 
     const videoSources = [];
 
-    for (let translatorIndex = 0; translatorIndex < translators.length; translatorIndex++) {
-      const translator = translators[translatorIndex];
+    for (const translator of translators) {
       const translatorId = translator.id || data.translatorId;
 
       if (!translatorId || translatorId === "0") {
@@ -399,10 +398,10 @@ class Provider {
         videoSources.push({
           url: source.url,
           type: source.type || this.detectVideoType(source.url),
-          quality: translatorName + " - " + sourceQuality,
+          quality: translatorName + " " + sourceQuality,
           label: translatorName,
           subtitles: source.subtitles || [],
-          _translatorOrder: translatorIndex,
+          _translatorIndex: translators.indexOf(translator),
           _qualityRank: this.qualityRank(sourceQuality),
         });
       }
@@ -759,7 +758,12 @@ class Provider {
       const quality = this.cleanText(source.quality).trim();
       const label = this.cleanText(source.label || "").trim();
 
-      if (!this.isValidDisplayQuality(quality)) {
+      if (
+        !quality ||
+        quality === "." ||
+        quality === "-" ||
+        !/(2160p|1440p|1080p|720p|480p|360p|240p|auto)/i.test(quality)
+      ) {
         continue;
       }
 
@@ -777,8 +781,10 @@ class Provider {
         quality: quality,
         label: label || undefined,
         subtitles: source.subtitles || [],
-        _translatorOrder:
-          typeof source._translatorOrder === "number" ? source._translatorOrder : 9999,
+        _translatorIndex:
+          typeof source._translatorIndex === "number"
+            ? source._translatorIndex
+            : 9999,
         _qualityRank:
           typeof source._qualityRank === "number"
             ? source._qualityRank
@@ -787,8 +793,8 @@ class Provider {
     }
 
     result.sort((a, b) => {
-      if (a._translatorOrder !== b._translatorOrder) {
-        return a._translatorOrder - b._translatorOrder;
+      if (a._translatorIndex !== b._translatorIndex) {
+        return a._translatorIndex - b._translatorIndex;
       }
 
       if (a._qualityRank !== b._qualityRank) {
@@ -798,26 +804,13 @@ class Provider {
       return String(a.quality).localeCompare(String(b.quality));
     });
 
-    for (const source of result) {
-      delete source._translatorOrder;
-      delete source._qualityRank;
-    }
-
-    return result;
-  }
-
-  isValidDisplayQuality(value) {
-    value = String(value || "").trim();
-
-    if (!value || value === "." || value === "-" || value === "—") {
-      return false;
-    }
-
-    if (this.isBadQuality(value)) {
-      return false;
-    }
-
-    return /(2160p|1440p|1080p|720p|480p|360p|240p|auto)/i.test(value);
+    return result.map((source) => ({
+      url: source.url,
+      type: source.type,
+      quality: source.quality,
+      label: source.label,
+      subtitles: source.subtitles || [],
+    }));
   }
 
   qualityRank(value) {
