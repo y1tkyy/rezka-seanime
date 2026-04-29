@@ -130,41 +130,43 @@ class Provider {
 
     const html = await res.text();
     const animeId = this.extractAnimeId(html, url);
-    const translator = this.extractTranslator(html, url);
+    const translators = this.extractTranslators(html, url);
+    const activeTranslator = translators.length > 0 ? translators[0] : this.extractTranslator(html, url);
     const episodes = [];
-    const regex = /<a([^>]*class="[^"]*b-simple_episode__item[^"]*"[^>]*)>([\s\S]*?)<\/a>/g;
-    let match;
+    const seen = {};
 
-    while ((match = regex.exec(html)) !== null) {
-      const attrs = match[1];
-      const text = this.cleanText(match[2]);
-      const href = this.getAttr(attrs, "href");
-      const episodeId = this.getAttr(attrs, "data-episode_id");
-      const seasonId = this.getAttr(attrs, "data-season_id");
-      const dataId = this.getAttr(attrs, "data-id");
+    const addEpisode = (episodeUrl, attrs, text) => {
+      episodeUrl = this.absoluteUrl(episodeUrl || url);
 
       const episodeNumber =
-        this.toNumber(episodeId) ||
+        this.toNumber(this.getAttr(attrs, "data-episode_id")) ||
         this.extractEpisodeNumber(text) ||
-        this.extractEpisodeNumber(href);
+        this.extractEpisodeNumber(episodeUrl);
 
       if (!episodeNumber) {
-        continue;
+        return;
       }
 
       const seasonNumber =
-        this.toNumber(seasonId) ||
-        this.extractSeasonNumber(href) ||
+        this.toNumber(this.getAttr(attrs, "data-season_id")) ||
+        this.extractSeasonNumber(episodeUrl) ||
         this.extractSeasonNumber(url) ||
         1;
 
-      const epUrl = href ? this.absoluteUrl(href) : url;
+      const key = seasonNumber + ":" + episodeNumber;
+
+      if (seen[key]) {
+        return;
+      }
+
+      seen[key] = true;
 
       const payload = {
-        url: epUrl,
-        animeId: dataId || animeId,
-        translatorId: translator.id,
-        translatorName: translator.name,
+        url: episodeUrl,
+        animeId: this.getAttr(attrs, "data-id") || animeId,
+        translatorId: activeTranslator.id,
+        translatorName: activeTranslator.name,
+        translators: translators,
         season: seasonNumber,
         episode: episodeNumber,
       };
@@ -172,13 +174,36 @@ class Provider {
       episodes.push({
         id: JSON.stringify(payload),
         number: episodeNumber,
-        title: translator.name + " - Episode " + episodeNumber,
-        url: epUrl,
+        title: "Season " + seasonNumber + " - Episode " + episodeNumber,
+        url: episodeUrl,
       });
+    };
+
+    const classRegex = /<a\b([^>]*class=["'][^"']*b-simple_episode__item[^"']*["'][^>]*)>([\s\S]*?)<\/a>/gi;
+    let classMatch;
+
+    while ((classMatch = classRegex.exec(html)) !== null) {
+      addEpisode(this.getAttr(classMatch[1], "href"), classMatch[1], this.cleanText(classMatch[2]));
+    }
+
+    const hrefRegex = /<a\b([^>]*href=["']([^"']*(?:\d+-season\/\d+-episode\.html|#t:\d+-s:\d+-e:\d+)[^"']*)["'][^>]*)>([\s\S]*?)<\/a>/gi;
+    let hrefMatch;
+
+    while ((hrefMatch = hrefRegex.exec(html)) !== null) {
+      addEpisode(hrefMatch[2], hrefMatch[1], this.cleanText(hrefMatch[3]));
+    }
+
+    const dataRegex = /<[^>]+data-season_id=["'](\d+)["'][^>]+data-episode_id=["'](\d+)["'][^>]*>/gi;
+    let dataMatch;
+
+    while ((dataMatch = dataRegex.exec(html)) !== null) {
+      const attrs = dataMatch[0];
+      const href = this.getAttr(attrs, "href");
+      addEpisode(href || url, attrs, "Episode " + dataMatch[2]);
     }
 
     if (episodes.length === 0) {
-      const hashEpisodes = this.extractHashEpisodes(html, url, animeId, translator);
+      const hashEpisodes = this.extractHashEpisodes(html, url, animeId, activeTranslator, translators);
       for (const ep of hashEpisodes) {
         episodes.push(ep);
       }
@@ -191,8 +216,9 @@ class Provider {
       const payload = {
         url: url,
         animeId: animeId,
-        translatorId: translator.id,
-        translatorName: translator.name,
+        translatorId: activeTranslator.id,
+        translatorName: activeTranslator.name,
+        translators: translators,
         season: seasonNumber,
         episode: episodeNumber,
       };
@@ -200,7 +226,7 @@ class Provider {
       episodes.push({
         id: JSON.stringify(payload),
         number: episodeNumber,
-        title: translator.name + " - Episode " + episodeNumber,
+        title: "Season " + seasonNumber + " - Episode " + episodeNumber,
         url: url,
       });
     }
@@ -212,36 +238,86 @@ class Provider {
 
   async findEpisodeServer(episode, server) {
     const data = this.parseEpisodeId(episode);
+    let translators = data.translators && data.translators.length ? data.translators : [];
 
-    const ajaxSources = await this.getStreamSources(data);
+    if (translators.length === 0) {
+      try {
+        const res = await fetch(data.url, {
+          headers: {
+            ...this.headers,
+            Referer: this.base + "/",
+          },
+        });
 
-    if (ajaxSources.length > 0) {
-      return {
-        server: server === "default" ? "default" : server,
-        headers: {
-          Referer: this.base + "/",
-          Origin: this.base,
-          "User-Agent": this.headers["User-Agent"],
+        if (res.ok) {
+          const html = await res.text();
+          translators = this.extractTranslators(html, data.url);
+        }
+      } catch (_) {}
+    }
+
+    if (translators.length === 0) {
+      translators = [
+        {
+          id: data.translatorId || "0",
+          name: data.translatorName || "Default",
+          url: data.url,
         },
-        videoSources: ajaxSources,
+      ];
+    }
+
+    const videoSources = [];
+
+    for (const translator of translators) {
+      const translatorData = {
+        url: this.getEpisodeUrlForTranslator(translator, data),
+        animeId: data.animeId,
+        translatorId: translator.id,
+        translatorName: translator.name,
+        season: data.season,
+        episode: data.episode,
       };
+
+      const ajaxSources = await this.getStreamSources(translatorData);
+
+      for (const source of ajaxSources) {
+        videoSources.push({
+          url: source.url,
+          type: source.type,
+          quality: translator.name + " - " + source.quality,
+          label: translator.name,
+          subtitles: source.subtitles || [],
+        });
+      }
+
+      if (ajaxSources.length === 0) {
+        try {
+          const res = await fetch(translatorData.url, {
+            headers: {
+              ...this.headers,
+              Referer: this.base + "/",
+            },
+          });
+
+          if (res.ok) {
+            const html = await res.text();
+            const htmlSources = this.extractSources(html);
+
+            for (const source of htmlSources) {
+              videoSources.push({
+                url: source.url,
+                type: source.type,
+                quality: translator.name + " - " + source.quality,
+                label: translator.name,
+                subtitles: source.subtitles || [],
+              });
+            }
+          }
+        } catch (_) {}
+      }
     }
 
-    const res = await fetch(data.url, {
-      headers: {
-        ...this.headers,
-        Referer: this.base + "/",
-      },
-    });
-
-    if (!res.ok) {
-      throw new Error("Failed to fetch episode page: " + res.status);
-    }
-
-    const html = await res.text();
-    const htmlSources = this.extractSources(html);
-
-    if (htmlSources.length > 0) {
+    if (videoSources.length > 0) {
       return {
         server: server === "default" ? "default" : server,
         headers: {
@@ -249,7 +325,7 @@ class Provider {
           Origin: this.base,
           "User-Agent": this.headers["User-Agent"],
         },
-        videoSources: htmlSources,
+        videoSources: this.dedupeSources(videoSources),
       };
     }
 
@@ -272,6 +348,14 @@ class Provider {
         "&episode=" +
         encodeURIComponent(String(data.episode)) +
         "&action=get_stream",
+      "action=get_stream&id=" +
+        encodeURIComponent(data.animeId) +
+        "&translator_id=" +
+        encodeURIComponent(data.translatorId) +
+        "&season=" +
+        encodeURIComponent(String(data.season)) +
+        "&episode=" +
+        encodeURIComponent(String(data.episode)),
       "id=" +
         encodeURIComponent(data.animeId) +
         "&translator_id=" +
@@ -346,7 +430,7 @@ class Provider {
 
     this.extractSourceString(text, sources);
 
-    return sources;
+    return this.dedupeSources(sources);
   }
 
   extractSourceValue(value, sources) {
@@ -521,6 +605,24 @@ class Provider {
     });
   }
 
+  dedupeSources(sources) {
+    const result = [];
+    const seen = {};
+
+    for (const source of sources) {
+      const key = source.label + "|" + source.quality + "|" + source.url;
+
+      if (seen[key]) {
+        continue;
+      }
+
+      seen[key] = true;
+      result.push(source);
+    }
+
+    return result;
+  }
+
   parseEpisodeId(episode) {
     try {
       const parsed = JSON.parse(episode.id);
@@ -536,6 +638,7 @@ class Provider {
       animeId: this.extractAnimeId("", url),
       translatorId: this.extractTranslatorIdFromUrl(url) || "0",
       translatorName: "Default",
+      translators: [],
       season: this.extractSeasonNumber(url) || 1,
       episode: this.extractEpisodeNumber(url) || episode.number || 1,
     };
@@ -581,6 +684,53 @@ class Provider {
     return "";
   }
 
+  extractTranslators(html, url) {
+    const translators = [];
+    const seen = {};
+    const regex = /<[^>]+class=["'][^"']*b-translator__item[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi;
+    let match;
+
+    while ((match = regex.exec(html)) !== null) {
+      const tag = match[0];
+      const id = this.getAttr(tag, "data-translator_id") || this.extractTranslatorIdFromUrl(tag);
+
+      if (!id || seen[id]) {
+        continue;
+      }
+
+      seen[id] = true;
+
+      const href = this.getAttr(tag, "href");
+      const name = this.cleanText(this.getAttr(tag, "title") || tag) || "Translator " + id;
+
+      translators.push({
+        id: id,
+        name: name,
+        url: href ? this.absoluteUrl(href) : url,
+      });
+    }
+
+    const current = this.extractTranslator(html, url);
+
+    if (current.id && !seen[current.id]) {
+      translators.unshift({
+        id: current.id,
+        name: current.name,
+        url: url,
+      });
+    }
+
+    if (translators.length === 0) {
+      translators.push({
+        id: this.extractTranslatorIdFromUrl(url) || "0",
+        name: "Default",
+        url: url,
+      });
+    }
+
+    return translators;
+  }
+
   extractTranslator(html, url) {
     const activeMatch =
       html.match(/<[^>]+class=["'][^"']*b-translator__item[^"']*active[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/i) ||
@@ -603,7 +753,31 @@ class Provider {
     };
   }
 
-  extractHashEpisodes(html, pageUrl, animeId, translator) {
+  getEpisodeUrlForTranslator(translator, data) {
+    let url = translator.url || data.url;
+
+    url = this.normalizeUrl(url);
+
+    if (url.indexOf("#") !== -1) {
+      return url.split("#")[0] + "#t:" + translator.id + "-s:" + data.season + "-e:" + data.episode;
+    }
+
+    if (url.match(/\/\d+-season\/\d+-episode\.html/i)) {
+      return url.replace(/\/\d+-season\/\d+-episode\.html/i, "/" + data.season + "-season/" + data.episode + "-episode.html");
+    }
+
+    if (url.match(/\/\d+-season\.html/i)) {
+      return url.replace(/\/\d+-season\.html/i, "/" + data.season + "-season/" + data.episode + "-episode.html");
+    }
+
+    if (url.match(/\.html/i)) {
+      return url.replace(/\.html.*$/i, "/" + data.season + "-season/" + data.episode + "-episode.html");
+    }
+
+    return data.url;
+  }
+
+  extractHashEpisodes(html, pageUrl, animeId, translator, translators) {
     const episodes = [];
     const seen = {};
     const regex = /#t:(\d+)-s:(\d+)-e:(\d+)/g;
@@ -613,7 +787,7 @@ class Provider {
       const translatorId = match[1];
       const season = parseInt(match[2], 10);
       const episode = parseInt(match[3], 10);
-      const key = translatorId + ":" + season + ":" + episode;
+      const key = season + ":" + episode;
 
       if (seen[key]) {
         continue;
@@ -626,6 +800,7 @@ class Provider {
         animeId: animeId,
         translatorId: translatorId,
         translatorName: translator.id === translatorId ? translator.name : "Translator " + translatorId,
+        translators: translators,
         season: season,
         episode: episode,
       };
@@ -633,7 +808,7 @@ class Provider {
       episodes.push({
         id: JSON.stringify(payload),
         number: episode,
-        title: payload.translatorName + " - Episode " + episode,
+        title: "Season " + season + " - Episode " + episode,
         url: payload.url,
       });
     }
