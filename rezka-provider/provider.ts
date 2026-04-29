@@ -427,6 +427,12 @@ class Provider {
       }
     }
 
+    const inlineSources = await this.getInlineSeriesPageSources(data);
+
+    if (inlineSources.length > 0) {
+      return inlineSources;
+    }
+
     const urls = [
       this.base + "/ajax/get_cdn_series/?t=" + Date.now(),
       this.base + "/engine/ajax/get_cdn_series/?t=" + Date.now(),
@@ -479,6 +485,94 @@ class Provider {
     }
 
     return [];
+  }
+
+  async getInlineSeriesPageSources(data) {
+    try {
+      const res = await fetch(data.baseUrl || data.url, {
+        headers: {
+          ...this.headers,
+          Referer: this.base + "/",
+        },
+      });
+
+      if (!res.ok) {
+        return [];
+      }
+
+      const html = await res.text();
+      const init = this.extractInitCDNSeriesData(html);
+
+      if (!init) {
+        return [];
+      }
+
+      if (
+        this.toNumber(init.animeId) !== this.toNumber(data.animeId) ||
+        this.toNumber(init.translatorId) !== this.toNumber(data.translatorId) ||
+        this.toNumber(init.season) !== this.toNumber(data.season) ||
+        this.toNumber(init.episode) !== this.toNumber(data.episode)
+      ) {
+        return [];
+      }
+
+      const sources = [];
+      this.extractSourceString(init.streams, sources);
+
+      return this.dedupeSources(sources);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  extractInitCDNSeriesData(html) {
+    html = String(html || "");
+
+    const initMatch = html.match(
+      /initCDNSeriesEvents\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,[\s\S]*?(\{[\s\S]*?\})\s*\)\s*;/i
+    );
+
+    if (!initMatch) {
+      return null;
+    }
+
+    const animeId = initMatch[1];
+    const translatorId = initMatch[2];
+    const season = initMatch[3];
+    const episode = initMatch[4];
+    const objectText = initMatch[5];
+
+    try {
+      const obj = JSON.parse(objectText);
+
+      return {
+        animeId: animeId,
+        translatorId: translatorId,
+        season: season,
+        episode: episode,
+        streams: obj.streams || "",
+        defaultQuality: obj.default_quality || "",
+      };
+    } catch (_) {}
+
+    const streamsMatch = objectText.match(/"streams"\s*:\s*"((?:\\"|[^"])*)"/i);
+    const defaultQualityMatch = objectText.match(/"default_quality"\s*:\s*"([^"]*)"/i);
+
+    if (!streamsMatch) {
+      return null;
+    }
+
+    return {
+      animeId: animeId,
+      translatorId: translatorId,
+      season: season,
+      episode: episode,
+      streams: streamsMatch[1]
+        .replace(/\\"/g, '"')
+        .replace(/\\\//g, "/")
+        .replace(/\\\\/g, "\\"),
+      defaultQuality: defaultQualityMatch ? defaultQualityMatch[1] : "",
+    };
   }
 
   async getMoviePageSources(data) {
@@ -1140,16 +1234,39 @@ class Provider {
   }
 
   extractAnimeId(html, url) {
-    const dataIdMatch = String(html || "").match(/data-id=["'](\d+)["']/i);
+    html = String(html || "");
+    url = String(url || "");
 
-    if (dataIdMatch) {
-      return dataIdMatch[1];
-    }
-
-    const urlMatch = String(url || "").match(/\/(\d+)-[^/]+\.html/i);
+    const urlMatch = url.match(/\/(\d+)-[^/]+\.html/i);
 
     if (urlMatch) {
       return urlMatch[1];
+    }
+
+    const episodeDataIdMatch = html.match(
+      /class=["'][^"']*b-simple_episode__item[^"']*["'][^>]*data-id=["'](\d+)["']/i
+    );
+
+    if (episodeDataIdMatch) {
+      return episodeDataIdMatch[1];
+    }
+
+    const seriesInitMatch = html.match(/initCDNSeriesEvents\s*\(\s*(\d+)\s*,/i);
+
+    if (seriesInitMatch) {
+      return seriesInitMatch[1];
+    }
+
+    const movieInitMatch = html.match(/initCDNMoviesEvents\s*\(\s*(\d+)\s*,/i);
+
+    if (movieInitMatch) {
+      return movieInitMatch[1];
+    }
+
+    const dataIdMatch = html.match(/data-id=["'](\d+)["']/i);
+
+    if (dataIdMatch) {
+      return dataIdMatch[1];
     }
 
     return "";
@@ -1158,11 +1275,16 @@ class Provider {
   extractTranslators(html, url) {
     const translators = [];
     const seen = {};
-    const regex = /<[^>]+class=["'][^"']*b-translator__item[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi;
+    html = String(html || "");
+
+    const regex =
+      /<[^>]+class=["'][^"']*b-translator__item[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi;
+
     let match;
 
     while ((match = regex.exec(html)) !== null) {
       const tag = match[0];
+
       const id =
         this.getAttr(tag, "data-translator_id") ||
         this.extractTranslatorIdFromUrl(tag);
@@ -1174,7 +1296,9 @@ class Provider {
       seen[id] = true;
 
       const href = this.getAttr(tag, "href");
-      const name = this.cleanText(this.getAttr(tag, "title") || tag) || "Translator " + id;
+      const name =
+        this.cleanText(this.getAttr(tag, "title") || tag) ||
+        "Translator " + id;
 
       translators.push({
         id: id,
@@ -1183,36 +1307,106 @@ class Provider {
       });
     }
 
-    if (translators.length === 0) {
-      const id = this.extractTranslatorIdFromUrl(url) || "0";
-      translators.push({
-        id: id,
-        name: "Default",
-        url: url,
-      });
+    if (translators.length > 0) {
+      return translators;
     }
 
-    return translators;
+    const seriesInitMatch = html.match(
+      /initCDNSeriesEvents\s*\(\s*\d+\s*,\s*(\d+)\s*,/i
+    );
+
+    if (seriesInitMatch) {
+      return [
+        {
+          id: seriesInitMatch[1],
+          name: "Default",
+          url: this.makeEpisodeUrl(url, seriesInitMatch[1], 1, 1),
+        },
+      ];
+    }
+
+    const movieInitMatch = html.match(
+      /initCDNMoviesEvents\s*\(\s*\d+\s*,\s*(\d+)\s*,/i
+    );
+
+    if (movieInitMatch) {
+      return [
+        {
+          id: movieInitMatch[1],
+          name: "Default",
+          url: url,
+        },
+      ];
+    }
+
+    const id = this.extractTranslatorIdFromUrl(url);
+
+    if (id) {
+      return [
+        {
+          id: id,
+          name: "Default",
+          url: url,
+        },
+      ];
+    }
+
+    return [];
   }
 
   extractActiveTranslator(html, url, translators) {
-    const activeMatch =
-      String(html || "").match(/<[^>]+class=["'][^"']*b-translator__item[^"']*active[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/i);
+    html = String(html || "");
+
+    const activeMatch = html.match(
+      /<[^>]+class=["'][^"']*b-translator__item[^"']*active[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/i
+    );
 
     if (activeMatch) {
       const tag = activeMatch[0];
+
       const id =
         this.getAttr(tag, "data-translator_id") ||
         this.extractTranslatorIdFromUrl(tag) ||
-        this.extractTranslatorIdFromUrl(url) ||
-        "0";
+        this.extractTranslatorIdFromUrl(url);
 
-      const name = this.cleanText(this.getAttr(tag, "title") || tag) || "Translator " + id;
+      const name =
+        this.cleanText(this.getAttr(tag, "title") || tag) ||
+        "Translator " + id;
 
       return {
         id: id,
         name: name,
-        url: this.getAttr(tag, "href") ? this.absoluteUrl(this.getAttr(tag, "href")) : url,
+        url: this.getAttr(tag, "href")
+          ? this.absoluteUrl(this.getAttr(tag, "href"))
+          : url,
+      };
+    }
+
+    const seriesInitMatch = html.match(
+      /initCDNSeriesEvents\s*\(\s*\d+\s*,\s*(\d+)\s*,/i
+    );
+
+    if (seriesInitMatch) {
+      const id = seriesInitMatch[1];
+
+      return {
+        id: id,
+        name: "Default",
+        url: this.makeEpisodeUrl(url, id, 1, 1),
+      };
+    }
+
+    const movieInitMatch = html.match(
+      /initCDNMoviesEvents\s*\(\s*\d+\s*,\s*(\d+)\s*,/i
+    );
+
+    if (movieInitMatch) {
+      const id = movieInitMatch[1];
+
+      return {
+        id: id,
+        name: "Default",
+        url: url,
       };
     }
 
@@ -1237,7 +1431,7 @@ class Provider {
     }
 
     return {
-      id: "0",
+      id: "",
       name: "Default",
       url: url,
     };
@@ -1298,16 +1492,18 @@ class Provider {
   }
 
   extractTranslatorIdFromUrl(url) {
-    const hashMatch = String(url || "").match(/#t:(\d+)/);
+    url = String(url || "");
+
+    const hashMatch = url.match(/#t:(\d+)/);
 
     if (hashMatch) {
       return hashMatch[1];
     }
 
-    const pathMatch = String(url || "").match(/\/(\d+)-[^/]+(?:\/\d+-season(?:\/\d+-episode)?\.html|\.html)/i);
+    const translatorPathMatch = url.match(/\/\d+-[^/]+\/(\d+)-[^/]+\.html/i);
 
-    if (pathMatch) {
-      return pathMatch[1];
+    if (translatorPathMatch) {
+      return translatorPathMatch[1];
     }
 
     return "";
