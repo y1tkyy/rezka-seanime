@@ -323,7 +323,7 @@ class Provider {
       for (const source of sources) {
         const quality = this.normalizeQuality(source.quality);
 
-        if (!quality || this.isPremiumQuality(quality)) {
+        if (!quality || this.isBadQuality(quality)) {
           continue;
         }
 
@@ -417,25 +417,12 @@ class Provider {
     try {
       const json = JSON.parse(text);
 
-      if (json.url) {
-        this.extractSourceString(json.url, sources);
-      }
+      if (json.url) this.extractSourceString(json.url, sources);
+      if (json.file) this.extractSourceString(json.file, sources);
+      if (json.stream) this.extractSourceString(json.stream, sources);
+      if (json.sources) this.extractSourceValue(json.sources, sources);
 
-      if (json.file) {
-        this.extractSourceString(json.file, sources);
-      }
-
-      if (json.stream) {
-        this.extractSourceString(json.stream, sources);
-      }
-
-      if (json.sources) {
-        this.extractSourceValue(json.sources, sources);
-      }
-
-      if (sources.length > 0) {
-        return this.dedupeSources(sources).filter((source) => !this.isPremiumQuality(source.quality));
-      }
+      return this.dedupeSources(sources);
     } catch (_) {}
 
     const decoded = this.decodeStreamString(text);
@@ -446,7 +433,7 @@ class Provider {
 
     this.extractSourceString(text, sources);
 
-    return this.dedupeSources(sources).filter((source) => !this.isPremiumQuality(source.quality));
+    return this.dedupeSources(sources);
   }
 
   extractSourceValue(value, sources) {
@@ -481,9 +468,7 @@ class Provider {
   }
 
   extractSourceString(value, sources) {
-    if (!value) {
-      return;
-    }
+    if (!value) return;
 
     value = this.decodeHtml(String(value))
       .replace(/\\\//g, "/")
@@ -495,19 +480,27 @@ class Provider {
       value = decoded;
     }
 
-    value = value.replace(/<span[^>]*class=["'][^"']*pjs-prem-quality[^"']*["'][^>]*>[\s\S]*?<\/span>/gi, "");
-    value = value.replace(/<[^>]+>/g, "");
+    value = this.removePremiumParts(value);
+
+    let foundQualityPairs = false;
 
     const bracketRegex = /\[([^\]]+)\](https?:\/\/[^\s,\[\]]+)/g;
     let bracketMatch;
 
     while ((bracketMatch = bracketRegex.exec(value)) !== null) {
-      const quality = this.normalizeQuality(bracketMatch[1]);
+      const rawQuality = bracketMatch[1];
 
-      if (!quality || this.isPremiumQuality(quality)) {
+      if (this.isBadQuality(rawQuality)) {
         continue;
       }
 
+      const quality = this.normalizeQuality(rawQuality);
+
+      if (!quality) {
+        continue;
+      }
+
+      foundQualityPairs = true;
       this.addSource(sources, bracketMatch[2], quality);
     }
 
@@ -515,28 +508,42 @@ class Provider {
     let pairMatch;
 
     while ((pairMatch = pairRegex.exec(value)) !== null) {
-      const quality = this.normalizeQuality(pairMatch[1]);
+      const rawQuality = pairMatch[1];
 
-      if (!quality || this.isPremiumQuality(quality)) {
+      if (this.isBadQuality(rawQuality)) {
         continue;
       }
 
+      const quality = this.normalizeQuality(rawQuality);
+
+      if (!quality) {
+        continue;
+      }
+
+      foundQualityPairs = true;
       this.addSource(sources, pairMatch[2], quality);
     }
 
-    const directRegex = /https?:\/\/[^"'\\\s,\[\]]+(?:\.m3u8|\.mp4)[^"'\\\s,\[\]]*/g;
-    let directMatch;
+    if (!foundQualityPairs) {
+      const directRegex = /https?:\/\/[^"'\\\s,\[\]]+(?:\.m3u8|\.mp4)[^"'\\\s,\[\]]*/g;
+      let directMatch;
 
-    while ((directMatch = directRegex.exec(value)) !== null) {
-      const before = value.slice(Math.max(0, directMatch.index - 80), directMatch.index);
-      const qualityMatch = before.match(/(2160p|1440p|1080p|720p|480p|360p|240p)(?!\s*Ultra)/i);
-      const quality = qualityMatch ? this.normalizeQuality(qualityMatch[1]) : "auto";
+      while ((directMatch = directRegex.exec(value)) !== null) {
+        const before = value.slice(Math.max(0, directMatch.index - 120), directMatch.index);
 
-      if (this.isPremiumQuality(before) || this.isPremiumQuality(quality)) {
-        continue;
+        if (this.isBadQuality(before)) {
+          continue;
+        }
+
+        const qualityMatch = before.match(/(2160p|1440p|1080p|720p|480p|360p|240p|auto)/i);
+        const quality = qualityMatch ? this.normalizeQuality(qualityMatch[1]) : "auto";
+
+        if (!quality) {
+          continue;
+        }
+
+        this.addSource(sources, directMatch[0], quality);
       }
-
-      this.addSource(sources, directMatch[0], quality);
     }
 
     const fileRegex = /file\s*:\s*["']([^"']+)["']/gi;
@@ -559,6 +566,18 @@ class Provider {
     while ((sourceMatch = sourceRegex.exec(value)) !== null) {
       this.addSource(sources, sourceMatch[1], "auto");
     }
+  }
+
+  removePremiumParts(value) {
+    value = String(value || "");
+
+    value = value.replace(/\[[^\]]*(?:Ultra|Premium|premium|pjs-prem-quality|prem-icon|static\.hdrezka|templates\/hdrezka)[^\]]*\]https?:\/\/[^\s,\[\]]+/gi, "");
+    value = value.replace(/<span[^>]*pjs-prem-quality[^>]*>[\s\S]*?<\/span>/gi, "");
+    value = value.replace(/<img[^>]*(?:prem-icon|static\.hdrezka|templates\/hdrezka)[^>]*>/gi, "");
+    value = value.replace(/&lt;span[\s\S]*?pjs-prem-quality[\s\S]*?&lt;\/span&gt;/gi, "");
+    value = value.replace(/&lt;img[\s\S]*?(?:prem-icon|static\.hdrezka|templates\/hdrezka)[\s\S]*?&gt;/gi, "");
+
+    return value;
   }
 
   decodeStreamString(value) {
@@ -616,13 +635,15 @@ class Provider {
   }
 
   addSource(sources, url, quality) {
-    if (!url) {
+    if (!url) return;
+
+    if (this.isBadQuality(quality)) {
       return;
     }
 
     quality = this.normalizeQuality(quality);
 
-    if (!quality || this.isPremiumQuality(quality)) {
+    if (!quality) {
       return;
     }
 
@@ -632,6 +653,10 @@ class Provider {
       .replace(/\\/g, "");
 
     if (url.indexOf("http") !== 0) {
+      return;
+    }
+
+    if (this.isPremiumUrl(url)) {
       return;
     }
 
@@ -656,32 +681,56 @@ class Provider {
   }
 
   normalizeQuality(quality) {
-    quality = this.cleanText(String(quality || "auto"));
+    quality = String(quality || "auto");
 
-    quality = quality
+    if (this.isBadQuality(quality)) {
+      return "";
+    }
+
+    quality = this.cleanText(quality)
       .replace(/\s+/g, " ")
       .replace(/\s*-\s*$/, "")
       .trim();
 
-    if (!quality) {
-      return "";
-    }
-
-    if (/ultra|premium|прем|prem-icon|pjs-prem-quality/i.test(quality)) {
+    if (this.isBadQuality(quality)) {
       return "";
     }
 
     const match = quality.match(/(2160p|1440p|1080p|720p|480p|360p|240p|auto)/i);
 
-    if (match) {
-      return match[1].toLowerCase() === "auto" ? "auto" : match[1];
+    if (!match) {
+      return "";
     }
 
-    return quality === "auto" ? "auto" : "";
+    return match[1].toLowerCase() === "auto" ? "auto" : match[1];
   }
 
-  isPremiumQuality(value) {
-    return /ultra|premium|прем|prem-icon|pjs-prem-quality/i.test(String(value || ""));
+  isBadQuality(value) {
+    value = String(value || "");
+
+    return (
+      /</.test(value) ||
+      />/.test(value) ||
+      /&lt;/.test(value) ||
+      /&gt;/.test(value) ||
+      /ultra/i.test(value) ||
+      /premium/i.test(value) ||
+      /pjs-prem-quality/i.test(value) ||
+      /prem-icon/i.test(value) ||
+      /static\.hdrezka/i.test(value) ||
+      /templates\/hdrezka/i.test(value)
+    );
+  }
+
+  isPremiumUrl(url) {
+    url = String(url || "");
+
+    return (
+      /prem-icon/i.test(url) ||
+      /static\.hdrezka/i.test(url) ||
+      /templates\/hdrezka/i.test(url) ||
+      /\.svg/i.test(url)
+    );
   }
 
   dedupeSources(sources) {
@@ -693,9 +742,13 @@ class Provider {
         continue;
       }
 
+      if (this.isBadQuality(source.quality) || this.isPremiumUrl(source.url)) {
+        continue;
+      }
+
       const quality = this.normalizeQuality(source.quality);
 
-      if (!quality || this.isPremiumQuality(quality)) {
+      if (!quality) {
         continue;
       }
 
