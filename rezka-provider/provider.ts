@@ -675,12 +675,6 @@ class Provider {
     return "";
   }
 
-  extractInitCDNSeriesData(html) {
-    const all = this.extractAllInitCDNSeriesData(html);
-
-    return all.length > 0 ? all[0] : null;
-  }
-
   splitTopLevelArgs(input) {
     input = String(input || "");
 
@@ -935,6 +929,12 @@ class Provider {
 
       await browser.navigate(data.url);
 
+      if (!browser.evaluate) {
+        await browser.close();
+        browser = null;
+        return [];
+      }
+
       $sleep(2500);
 
       const result = await browser.evaluate(`(() => {
@@ -1033,16 +1033,10 @@ class Provider {
 
   getTranslatorPageUrl(baseUrl, translator) {
     if (translator && translator.url) {
-      return translator.url;
+      return this.normalizeUrl(translator.url);
     }
 
-    const clean = this.basePageUrl(baseUrl);
-
-    if (translator && translator.id && translator.id !== "0") {
-      return clean.replace(/\.html$/i, "/" + translator.id + "-translator.html");
-    }
-
-    return clean;
+    return this.basePageUrl(baseUrl);
   }
 
   extractSources(text) {
