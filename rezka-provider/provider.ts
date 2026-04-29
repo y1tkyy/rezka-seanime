@@ -360,7 +360,8 @@ class Provider {
 
     const videoSources = [];
 
-    for (const translator of translators) {
+    for (let translatorIndex = 0; translatorIndex < translators.length; translatorIndex++) {
+      const translator = translators[translatorIndex];
       const translatorId = translator.id || data.translatorId;
 
       if (!translatorId || translatorId === "0") {
@@ -401,6 +402,8 @@ class Provider {
           quality: translatorName + " - " + sourceQuality,
           label: translatorName,
           subtitles: source.subtitles || [],
+          _translatorOrder: translatorIndex,
+          _qualityRank: this.qualityRank(sourceQuality),
         });
       }
     }
@@ -755,6 +758,11 @@ class Provider {
 
       const quality = this.cleanText(source.quality).trim();
       const label = this.cleanText(source.label || "").trim();
+
+      if (!this.isValidDisplayQuality(quality)) {
+        continue;
+      }
+
       const key = quality + "|" + source.url;
 
       if (seen[key]) {
@@ -769,21 +777,47 @@ class Provider {
         quality: quality,
         label: label || undefined,
         subtitles: source.subtitles || [],
+        _translatorOrder:
+          typeof source._translatorOrder === "number" ? source._translatorOrder : 9999,
+        _qualityRank:
+          typeof source._qualityRank === "number"
+            ? source._qualityRank
+            : this.qualityRank(quality),
       });
     }
 
     result.sort((a, b) => {
-      const qa = this.qualityRank(a.quality);
-      const qb = this.qualityRank(b.quality);
+      if (a._translatorOrder !== b._translatorOrder) {
+        return a._translatorOrder - b._translatorOrder;
+      }
 
-      if (qa !== qb) {
-        return qb - qa;
+      if (a._qualityRank !== b._qualityRank) {
+        return b._qualityRank - a._qualityRank;
       }
 
       return String(a.quality).localeCompare(String(b.quality));
     });
 
+    for (const source of result) {
+      delete source._translatorOrder;
+      delete source._qualityRank;
+    }
+
     return result;
+  }
+
+  isValidDisplayQuality(value) {
+    value = String(value || "").trim();
+
+    if (!value || value === "." || value === "-" || value === "—") {
+      return false;
+    }
+
+    if (this.isBadQuality(value)) {
+      return false;
+    }
+
+    return /(2160p|1440p|1080p|720p|480p|360p|240p|auto)/i.test(value);
   }
 
   qualityRank(value) {
