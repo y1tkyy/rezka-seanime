@@ -346,6 +346,7 @@ class Provider {
           id: data.translatorId || "0",
           name: data.translatorName || "Default",
           url: data.url,
+          index: 0,
         },
       ];
     }
@@ -396,7 +397,10 @@ class Provider {
           quality: translatorName + " " + sourceQuality,
           label: translatorName,
           subtitles: source.subtitles || [],
-          _translatorIndex: translators.indexOf(translator),
+          _translatorIndex:
+            typeof translator.index === "number"
+              ? translator.index
+              : translators.indexOf(translator),
           _qualityRank: this.qualityRank(sourceQuality),
         });
       }
@@ -1404,9 +1408,11 @@ class Provider {
       return String(a.quality).localeCompare(String(b.quality));
     });
 
-    return result.reverse().map((source) => ({
+    const fixed = result.reverse();
+
+    return fixed.map((source) => ({
       url: source.url,
-      type: source.type || this.detectVideoType(source.url),
+      type: source.type,
       quality: source.quality,
       label: source.label,
       subtitles: source.subtitles || [],
@@ -1661,6 +1667,7 @@ class Provider {
         id: id,
         name: name,
         url: href ? this.absoluteUrl(href) : this.makeEpisodeUrl(url, id, 1, 1),
+        index: translators.length,
       });
     }
 
@@ -1678,6 +1685,7 @@ class Provider {
           id: seriesInitMatch[1],
           name: "Default",
           url: this.makeEpisodeUrl(url, seriesInitMatch[1], 1, 1),
+          index: 0,
         },
       ];
     }
@@ -1692,6 +1700,7 @@ class Provider {
           id: movieInitMatch[1],
           name: "Default",
           url: url,
+          index: 0,
         },
       ];
     }
@@ -1704,6 +1713,7 @@ class Provider {
           id: id,
           name: "Default",
           url: url,
+          index: 0,
         },
       ];
     }
@@ -1730,12 +1740,19 @@ class Provider {
         this.cleanText(this.getAttr(tag, "title") || tag) ||
         "Translator " + id;
 
+      for (const translator of translators) {
+        if (translator.id === id) {
+          return translator;
+        }
+      }
+
       return {
         id: id,
         name: name,
         url: this.getAttr(tag, "href")
           ? this.absoluteUrl(this.getAttr(tag, "href"))
           : url,
+        index: 0,
       };
     }
 
@@ -1750,6 +1767,7 @@ class Provider {
         id: id,
         name: "Default",
         url: this.makeEpisodeUrl(url, id, 1, 1),
+        index: 0,
       };
     }
 
@@ -1764,6 +1782,7 @@ class Provider {
         id: id,
         name: "Default",
         url: url,
+        index: 0,
       };
     }
 
@@ -1780,6 +1799,7 @@ class Provider {
         id: urlTranslatorId,
         name: "Translator " + urlTranslatorId,
         url: url,
+        index: 0,
       };
     }
 
@@ -1791,6 +1811,7 @@ class Provider {
       id: "",
       name: "Default",
       url: url,
+      index: 0,
     };
   }
 
@@ -1812,12 +1833,17 @@ class Provider {
 
       seen[key] = true;
 
+      const matchedTranslator = translators.find((item) => item.id === translatorId);
       const payload = {
         url: this.makeEpisodeUrl(pageUrl, translatorId, season, episode),
         baseUrl: this.basePageUrl(pageUrl),
         animeId: animeId,
         translatorId: translatorId,
-        translatorName: translator.id === translatorId ? translator.name : "Translator " + translatorId,
+        translatorName: matchedTranslator
+          ? matchedTranslator.name
+          : translator.id === translatorId
+            ? translator.name
+            : "Translator " + translatorId,
         translators: translators,
         season: season,
         episode: episode,
