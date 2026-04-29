@@ -804,7 +804,10 @@ class Provider {
       return String(a.quality).localeCompare(String(b.quality));
     });
 
-    return result.reverse().map((source) => ({
+    const defaultSource = result[0];
+    const rest = result.slice(1).reverse();
+
+    return [defaultSource].concat(rest).map((source) => ({
       url: source.url,
       type: source.type,
       quality: source.quality,
