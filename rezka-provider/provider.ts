@@ -321,10 +321,16 @@ class Provider {
       const sources = await this.getStreamSources(translatorData);
 
       for (const source of sources) {
+        const quality = this.normalizeQuality(source.quality);
+
+        if (!quality || this.isPremiumQuality(quality)) {
+          continue;
+        }
+
         videoSources.push({
           url: source.url,
           type: source.type,
-          quality: translator.name + " - " + source.quality,
+          quality: translator.name + " - " + quality,
           label: translator.name,
           subtitles: [],
         });
@@ -428,7 +434,7 @@ class Provider {
       }
 
       if (sources.length > 0) {
-        return this.dedupeSources(sources);
+        return this.dedupeSources(sources).filter((source) => !this.isPremiumQuality(source.quality));
       }
     } catch (_) {}
 
@@ -440,7 +446,7 @@ class Provider {
 
     this.extractSourceString(text, sources);
 
-    return this.dedupeSources(sources);
+    return this.dedupeSources(sources).filter((source) => !this.isPremiumQuality(source.quality));
   }
 
   extractSourceValue(value, sources) {
@@ -489,18 +495,48 @@ class Provider {
       value = decoded;
     }
 
+    value = value.replace(/<span[^>]*class=["'][^"']*pjs-prem-quality[^"']*["'][^>]*>[\s\S]*?<\/span>/gi, "");
+    value = value.replace(/<[^>]+>/g, "");
+
     const bracketRegex = /\[([^\]]+)\](https?:\/\/[^\s,\[\]]+)/g;
     let bracketMatch;
 
     while ((bracketMatch = bracketRegex.exec(value)) !== null) {
-      this.addSource(sources, bracketMatch[2], bracketMatch[1]);
+      const quality = this.normalizeQuality(bracketMatch[1]);
+
+      if (!quality || this.isPremiumQuality(quality)) {
+        continue;
+      }
+
+      this.addSource(sources, bracketMatch[2], quality);
+    }
+
+    const pairRegex = /(?:^|,|\s)(2160p|1440p|1080p|720p|480p|360p|240p|auto)\s*[:=]\s*(https?:\/\/[^\s,\[\]]+)/gi;
+    let pairMatch;
+
+    while ((pairMatch = pairRegex.exec(value)) !== null) {
+      const quality = this.normalizeQuality(pairMatch[1]);
+
+      if (!quality || this.isPremiumQuality(quality)) {
+        continue;
+      }
+
+      this.addSource(sources, pairMatch[2], quality);
     }
 
     const directRegex = /https?:\/\/[^"'\\\s,\[\]]+(?:\.m3u8|\.mp4)[^"'\\\s,\[\]]*/g;
     let directMatch;
 
     while ((directMatch = directRegex.exec(value)) !== null) {
-      this.addSource(sources, directMatch[0], "auto");
+      const before = value.slice(Math.max(0, directMatch.index - 80), directMatch.index);
+      const qualityMatch = before.match(/(2160p|1440p|1080p|720p|480p|360p|240p)(?!\s*Ultra)/i);
+      const quality = qualityMatch ? this.normalizeQuality(qualityMatch[1]) : "auto";
+
+      if (this.isPremiumQuality(before) || this.isPremiumQuality(quality)) {
+        continue;
+      }
+
+      this.addSource(sources, directMatch[0], quality);
     }
 
     const fileRegex = /file\s*:\s*["']([^"']+)["']/gi;
@@ -584,6 +620,12 @@ class Provider {
       return;
     }
 
+    quality = this.normalizeQuality(quality);
+
+    if (!quality || this.isPremiumQuality(quality)) {
+      return;
+    }
+
     url = this.decodeHtml(String(url))
       .trim()
       .replace(/\\\//g, "/")
@@ -593,7 +635,7 @@ class Provider {
       return;
     }
 
-    if (sources.some((source) => source.url === url)) {
+    if (sources.some((source) => source.url === url && source.quality === quality)) {
       return;
     }
 
@@ -607,10 +649,39 @@ class Provider {
 
     sources.push({
       url: url,
-      quality: String(quality || "auto"),
+      quality: quality,
       type: type,
       subtitles: [],
     });
+  }
+
+  normalizeQuality(quality) {
+    quality = this.cleanText(String(quality || "auto"));
+
+    quality = quality
+      .replace(/\s+/g, " ")
+      .replace(/\s*-\s*$/, "")
+      .trim();
+
+    if (!quality) {
+      return "";
+    }
+
+    if (/ultra|premium|прем|prem-icon|pjs-prem-quality/i.test(quality)) {
+      return "";
+    }
+
+    const match = quality.match(/(2160p|1440p|1080p|720p|480p|360p|240p|auto)/i);
+
+    if (match) {
+      return match[1].toLowerCase() === "auto" ? "auto" : match[1];
+    }
+
+    return quality === "auto" ? "auto" : "";
+  }
+
+  isPremiumQuality(value) {
+    return /ultra|premium|прем|prem-icon|pjs-prem-quality/i.test(String(value || ""));
   }
 
   dedupeSources(sources) {
@@ -618,14 +689,31 @@ class Provider {
     const seen = {};
 
     for (const source of sources) {
-      const key = source.label + "|" + source.quality + "|" + source.url;
+      if (!source || !source.url) {
+        continue;
+      }
+
+      const quality = this.normalizeQuality(source.quality);
+
+      if (!quality || this.isPremiumQuality(quality)) {
+        continue;
+      }
+
+      const key = source.label + "|" + quality + "|" + source.url;
 
       if (seen[key]) {
         continue;
       }
 
       seen[key] = true;
-      result.push(source);
+
+      result.push({
+        url: source.url,
+        type: source.type,
+        quality: quality,
+        label: source.label,
+        subtitles: source.subtitles || [],
+      });
     }
 
     return result;
