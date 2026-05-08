@@ -4,6 +4,9 @@
 class Provider {
   constructor() {
     this.base = "https://rezka.ag";
+
+    // Shared headers for Rezka HTML and AJAX requests.
+    // Rezka expects X-Requested-With and form-urlencoded content for AJAX endpoints.
     this.headers = {
       Accept: "text/html, */*; q=0.01",
       "Accept-Language": "en-US,en;q=0.9,uk;q=0.8,ru;q=0.7",
@@ -24,6 +27,8 @@ class Provider {
   }
 
   async search(opts) {
+    // Try multiple possible anime titles because Rezka search can be sensitive.
+    // Seanime gives query/title/synonyms, so we test them until one returns results.
     const queries = [
       opts.query,
       opts.media && opts.media.englishTitle ? opts.media.englishTitle : "",
@@ -76,6 +81,8 @@ class Provider {
 
     const html = await res.text();
     const results = [];
+
+    // Rezka search returns a small HTML <li><a> list.
     const regex = /<li>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/li>/g;
     let match;
 
@@ -83,6 +90,7 @@ class Provider {
       const url = this.normalizeUrl(this.decodeHtml(match[1]));
       const inner = match[2];
 
+      // Limit results to animation/anime-like entries.
       if (url.indexOf("/animation/") === -1 && !/аниме/i.test(inner)) {
         continue;
       }
@@ -102,6 +110,7 @@ class Provider {
 
       const fullTitle = details ? title + " " + details : title;
 
+      // If Seanime provided a year, keep only matching Rezka results.
       if (year && fullTitle.indexOf(String(year)) === -1) {
         continue;
       }
@@ -154,6 +163,7 @@ class Provider {
       seasonNumber = this.toNumber(seasonNumber) || 1;
       episodeNumber = this.toNumber(episodeNumber);
 
+      // Some Rezka links have no data attributes, so try to extract from visible text/href.
       if (!episodeNumber) {
         episodeNumber =
           this.extractEpisodeNumber(text) ||
@@ -172,10 +182,15 @@ class Provider {
 
       seen[key] = true;
 
+      // Many Rezka episode items are <li> without href.
+      // In that case we encode season/episode/translator into hash form.
       const epUrl = href
         ? this.absoluteUrl(href)
         : this.makeEpisodeUrl(url, translatorId, seasonNumber, episodeNumber);
 
+      // Important:
+      // Seanime only keeps EpisodeDetails.id/url/number/title.
+      // We store Rezka-specific data inside JSON id so findEpisodeServer can recover it.
       const payload = {
         url: epUrl,
         baseUrl: this.basePageUrl(url),
@@ -200,6 +215,8 @@ class Provider {
       });
     };
 
+    // Main Rezka structure:
+    // <li class="b-simple_episode__item" data-id="..." data-season_id="..." data-episode_id="...">
     $(".b-simple_episode__item").each((_, el) => {
       const attrs = String(el.toString ? el.toString() : "");
 
@@ -215,6 +232,7 @@ class Provider {
         this.getAttr(attrs, "data-episode_id") ||
         this.getAttr(attrs, "data-episode-id");
 
+      // For problematic pages, this data-id is more reliable than random page data-id.
       const dataId =
         el.attr("data-id") ||
         this.getAttr(attrs, "data-id") ||
@@ -229,6 +247,7 @@ class Provider {
       pushEpisode(season, episode, href, dataId, text);
     });
 
+    // Fallback for malformed HTML or pages LoadDoc does not parse correctly.
     if (episodes.length === 0) {
       const itemRegex =
         /<[^>]*class=["'][^"']*b-simple_episode__item[^"']*["'][^>]*>/gi;
@@ -248,6 +267,8 @@ class Provider {
       }
     }
 
+    // Fallback for hash-style pages:
+    // https://rezka.ag/...html#t:19-s:2-e:1
     if (episodes.length === 0) {
       const hashEpisodes = this.extractHashEpisodes(
         html,
@@ -271,6 +292,9 @@ class Provider {
       }
     }
 
+    // Movie fallback:
+    // Films have no episode list, so return a single "Movie" episode.
+    // Keep isMovie=true so findEpisodeServer uses movie-specific extraction.
     if (episodes.length === 0) {
       const movieUrl =
         activeTranslator.url && activeTranslator.url !== url
@@ -299,6 +323,7 @@ class Provider {
       });
     }
 
+    // Sort by real Rezka season/episode first.
     episodes.sort((a, b) => {
       const seasonA = a._season || 1;
       const seasonB = b._season || 1;
@@ -310,6 +335,8 @@ class Provider {
       return (a._episode || a.number) - (b._episode || b.number);
     });
 
+    // Seanime works better when EpisodeDetails.number is unique and sequential.
+    // Real Rezka season/episode remains inside JSON id.
     for (let i = 0; i < episodes.length; i++) {
       episodes[i].number = i + 1;
 
@@ -324,6 +351,7 @@ class Provider {
     const data = this.parseEpisodeId(episodeOrId);
     let translators = data.translators && data.translators.length ? data.translators : [];
 
+    // If episode payload had no translator list, fetch page again and extract it.
     if (translators.length === 0) {
       try {
         const res = await fetch(data.baseUrl || data.url, {
@@ -340,6 +368,7 @@ class Provider {
       } catch (_) {}
     }
 
+    // Final fallback.
     if (translators.length === 0) {
       translators = [
         {
@@ -361,6 +390,8 @@ class Provider {
         continue;
       }
 
+      // Movies use translator page URL directly.
+      // Series use hash-encoded URL so the data object knows season/episode/translator.
       const episodeUrl = data.isMovie
         ? this.getTranslatorPageUrl(data.baseUrl || data.url, translator)
         : this.makeEpisodeUrl(
@@ -392,6 +423,8 @@ class Provider {
 
         const translatorName = translator.name || "Translator " + translatorId;
 
+        // quality must be unique in Seanime.
+        // So include translator name + resolution, e.g. "Дубляж 1080p".
         videoSources.push({
           url: source.url,
           type: source.type || this.detectVideoType(source.url),
@@ -427,6 +460,8 @@ class Provider {
   }
 
   async getStreamSources(data) {
+    // Movie extraction is different from series extraction.
+    // Rezka movie pages can require JS/player initialization, so keep movie logic isolated.
     if (data.isMovie) {
       const directSources = await this.getMoviePageSources(data);
 
@@ -435,12 +470,14 @@ class Provider {
       }
     }
 
+    // Some series pages include ready streams inside initCDNSeriesEvents(...).
     const inlineSources = await this.getInlineSeriesPageSources(data);
 
     if (inlineSources.length > 0) {
       return inlineSources;
     }
 
+    // Standard Rezka series AJAX endpoint.
     const url = this.base + "/ajax/get_cdn_series/?t=" + Date.now();
 
     const body =
@@ -495,6 +532,7 @@ class Provider {
       const inits = this.extractAllInitCDNSeriesData(html);
 
       for (const init of inits) {
+        // Only use inline stream if it matches the exact requested episode.
         if (
           this.toNumber(init.animeId) === this.toNumber(data.animeId) &&
           this.toNumber(init.translatorId) === this.toNumber(data.translatorId) &&
@@ -560,6 +598,7 @@ class Provider {
         break;
       }
 
+      // Parse function arguments safely because player config contains nested objects.
       const rawArgs = this.readFunctionArgs(html, index + marker.length);
 
       if (!rawArgs) {
@@ -569,6 +608,7 @@ class Provider {
 
       const args = this.splitTopLevelArgs(rawArgs);
 
+      // initCDNSeriesEvents(animeId, translatorId, season, episode, ..., playerConfig)
       if (args.length >= 9) {
         const objectText = args[8];
         const streams = this.extractJsonStringValue(objectText, "streams");
@@ -615,6 +655,8 @@ class Provider {
 
       const args = this.splitTopLevelArgs(rawArgs);
 
+      // Movie function shape varies, so use first two args as ids
+      // and the last arg as player config.
       if (args.length >= 2) {
         const animeId = args[0];
         const translatorId = args[1];
@@ -801,6 +843,9 @@ class Provider {
 
     const sources = [];
     const seenQuality = {};
+
+    // Rezka stream format:
+    // [360p]url or mirror or mp4,[480p]url or mirror...
     const blocks = streams.split(/,(?=\[(?:2160p|1440p|1080p|720p|480p|360p|240p|auto)\])/i);
 
     for (const block of blocks) {
@@ -829,6 +874,7 @@ class Provider {
           continue;
         }
 
+        // Use HLS manifest URLs only.
         if (url.indexOf(":hls:manifest.m3u8") === -1 && url.indexOf(".m3u8") === -1) {
           continue;
         }
@@ -840,6 +886,7 @@ class Provider {
         continue;
       }
 
+      // Prefer Rezka/ukrtelcdn over voidboost mirror.
       urls.sort((a, b) => {
         const aRezka = /ukrtelcdn/i.test(a) ? 1 : 0;
         const bRezka = /ukrtelcdn/i.test(b) ? 1 : 0;
@@ -859,18 +906,21 @@ class Provider {
   }
 
   async getMoviePageSources(data) {
+    // First try raw movie page stream config.
     const inlineMovieSources = await this.getInlineMoviePageSources(data);
 
     if (inlineMovieSources.length > 0) {
       return inlineMovieSources;
     }
 
+    // Keep ChromeDP for movie pages because some movie players create streams after JS runs.
     const browserSources = await this.getMoviePageSourcesWithBrowser(data);
 
     if (browserSources.length > 1) {
       return browserSources;
     }
 
+    // Final raw HTML fallback.
     try {
       const res = await fetch(data.url, {
         headers: {
@@ -1377,6 +1427,8 @@ class Provider {
       });
     }
 
+    // Sort in the order we want to provide to Seanime:
+    // Rezka translator order first, then highest quality first.
     result.sort((a, b) => {
       if (a._translatorIndex !== b._translatorIndex) {
         return a._translatorIndex - b._translatorIndex;
@@ -1590,6 +1642,7 @@ class Provider {
     html = String(html || "");
     url = String(url || "");
 
+    // Prefer ID from URL. This avoids accidentally reading unrelated data-id from comments/player.
     const urlMatch = url.match(/\/(\d+)-[^/]+\.html/i);
 
     if (urlMatch) {
@@ -1630,6 +1683,7 @@ class Provider {
     const seen = {};
     html = String(html || "");
 
+    // Normal Rezka translator list.
     const regex =
       /<[^>]+class=["'][^"']*b-translator__item[^"']*["'][^>]*>[\s\S]*?<\/[^>]+>/gi;
 
@@ -1665,6 +1719,7 @@ class Provider {
       return translators;
     }
 
+    // Fallback for pages with no visible translator list.
     const seriesInitMatch = html.match(
       /initCDNSeriesEvents\s*\(\s*\d+\s*,\s*(\d+)\s*,/i
     );
