@@ -4,7 +4,6 @@
 class Provider {
   constructor() {
     this.base = "https://rezka.ag";
-    this.browser = null;
 
     // Shared headers for Rezka HTML and AJAX requests.
     // Rezka expects X-Requested-With and form-urlencoded content for AJAX endpoints.
@@ -17,80 +16,6 @@ class Provider {
       "X-Requested-With": "XMLHttpRequest",
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-    };
-  }
-
-  // Rezka.ag sits behind an Anubis JS proof-of-work challenge (same family as
-  // Cloudflare's IUAM). Plain fetch() gets served the challenge page instead of
-  // real content, so every request goes through a headless Chrome instance kept
-  // alive for the lifetime of this Provider and reused for all calls.
-  async ensureBrowser() {
-    if (this.browser) {
-      return this.browser;
-    }
-
-    const browser = await ChromeDP.newBrowser({
-      headless: true,
-      timeout: 30,
-      userAgent: this.headers["User-Agent"],
-    });
-
-    await browser.navigate(this.base + "/");
-
-    // A real Chromium tab solves the proof-of-work automatically; just give it a moment.
-    let title = "";
-    for (let i = 0; i < 8; i++) {
-      title = await browser.evaluate("document.title");
-      if (String(title).indexOf("бот") === -1 && title !== "Verify") {
-        break;
-      }
-      await browser.sleep(1500);
-    }
-
-    this.browser = browser;
-    return browser;
-  }
-
-  // fetch()-compatible wrapper: runs the request inside the (already
-  // bot-check-cleared) headless browser tab instead of Seanime's own fetch(),
-  // so it carries the same cookies/session that solved the Anubis challenge.
-  async chromeFetch(url, options) {
-    options = options || {};
-    const browser = await this.ensureBrowser();
-
-    const method = options.method || "GET";
-    const headers = options.headers || {};
-    const body = options.body;
-
-    const js =
-      "(async () => {" +
-      "  const res = await fetch(" + JSON.stringify(url) + ", {" +
-      "    method: " + JSON.stringify(method) + "," +
-      "    headers: " + JSON.stringify(headers) + "," +
-      "    body: " + (body !== undefined ? JSON.stringify(body) : "undefined") + "," +
-      "    credentials: \"same-origin\"," +
-      "  });" +
-      "  const text = await res.text();" +
-      "  return JSON.stringify({ ok: res.ok, status: res.status, text: text });" +
-      "})()";
-
-    const raw = await browser.evaluate(js);
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (_) {
-      // Thrown as a plain string, not `new Error(...)`: Error objects have no
-      // own-enumerable properties, so Seanime's log ends up printing an empty
-      // `map[]` for them, losing the message. Strings survive intact.
-      throw "rezka: chromeFetch got a non-JSON response for " + url + ": " + String(raw).slice(0, 200);
-    }
-
-    return {
-      ok: parsed.ok,
-      status: parsed.status,
-      text: async () => parsed.text,
-      json: async () => JSON.parse(parsed.text),
     };
   }
 
@@ -144,7 +69,7 @@ class Provider {
   }
 
   async searchRezka(q, year) {
-    const res = await this.chromeFetch(this.base + "/engine/ajax/search.php", {
+    const res = await fetch(this.base + "/engine/ajax/search.php", {
       method: "POST",
       headers: this.headers,
       body: "q=" + encodeURIComponent(q),
@@ -204,7 +129,7 @@ class Provider {
   async findEpisodes(id) {
     const url = this.resolveUrl(id);
 
-    const res = await this.chromeFetch(url, {
+    const res = await fetch(url, {
       headers: {
         ...this.headers,
         Referer: this.base + "/",
@@ -212,7 +137,7 @@ class Provider {
     });
 
     if (!res.ok) {
-      throw "rezka: failed to fetch anime page: " + res.status;
+      throw new Error("Failed to fetch anime page: " + res.status);
     }
 
     const html = await res.text();
@@ -429,7 +354,7 @@ class Provider {
     // If episode payload had no translator list, fetch page again and extract it.
     if (translators.length === 0) {
       try {
-        const res = await this.chromeFetch(data.baseUrl || data.url, {
+        const res = await fetch(data.baseUrl || data.url, {
           headers: {
             ...this.headers,
             Referer: this.base + "/",
@@ -518,7 +443,7 @@ class Provider {
     const cleaned = this.dedupeVideoSourcesPreserveQuality(videoSources);
 
     if (cleaned.length === 0) {
-      throw "rezka: no video sources found";
+      throw new Error("No video sources found");
     }
 
     return {
@@ -567,7 +492,7 @@ class Provider {
       "&action=get_stream";
 
     try {
-      const res = await this.chromeFetch(url, {
+      const res = await fetch(url, {
         method: "POST",
         headers: {
           ...this.headers,
@@ -592,7 +517,7 @@ class Provider {
 
   async getInlineSeriesPageSources(data) {
     try {
-      const res = await this.chromeFetch(data.baseUrl || data.url, {
+      const res = await fetch(data.baseUrl || data.url, {
         headers: {
           ...this.headers,
           Referer: this.base + "/",
@@ -626,7 +551,7 @@ class Provider {
 
   async getInlineMoviePageSources(data) {
     try {
-      const res = await this.chromeFetch(data.url, {
+      const res = await fetch(data.url, {
         headers: {
           ...this.headers,
           Referer: data.baseUrl || this.base + "/",
@@ -997,7 +922,7 @@ class Provider {
 
     // Final raw HTML fallback.
     try {
-      const res = await this.chromeFetch(data.url, {
+      const res = await fetch(data.url, {
         headers: {
           ...this.headers,
           Referer: data.baseUrl || this.base + "/",
@@ -1047,12 +972,19 @@ class Provider {
   }
 
   async getMoviePageSourcesWithBrowser(data) {
+    let browser = null;
+
     try {
-      // Reuse the shared, already bot-check-cleared browser instead of spawning
-      // (and closing) a fresh one, which would pay the Anubis challenge again.
-      const browser = await this.ensureBrowser();
+      browser = await ChromeDP.newBrowser();
 
       await browser.navigate(data.url);
+
+      if (!browser.evaluate) {
+        await browser.close();
+        browser = null;
+        return [];
+      }
+
       $sleep(2500);
 
       const result = await browser.evaluate(`(() => {
@@ -1081,6 +1013,9 @@ class Provider {
           html: document.documentElement.outerHTML
         });
       })()`);
+
+      await browser.close();
+      browser = null;
 
       const parsed = JSON.parse(result || "{}");
 
@@ -1125,7 +1060,12 @@ class Provider {
 
       return this.dedupeSources(sources);
     } catch (_) {
-      // Don't close the browser here: it's the shared instance other calls reuse.
+      try {
+        if (browser) {
+          await browser.close();
+        }
+      } catch (_) {}
+
       return [];
     }
   }
@@ -1676,7 +1616,7 @@ class Provider {
 
   resolveUrl(id) {
     if (!id) {
-      throw "rezka: empty id";
+      throw new Error("Empty id");
     }
 
     try {
@@ -1695,7 +1635,7 @@ class Provider {
       return this.normalizeUrl(id);
     }
 
-    throw "rezka: invalid id, expected a URL from a search result";
+    throw new Error("Invalid id. Expected URL from search result.");
   }
 
   extractAnimeId(html, url) {
