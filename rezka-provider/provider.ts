@@ -54,6 +54,13 @@ class Provider {
   // fetch()-compatible wrapper: runs the request inside the (already
   // bot-check-cleared) headless browser tab instead of Seanime's own fetch(),
   // so it carries the same cookies/session that solved the Anubis challenge.
+  //
+  // Uses a SYNCHRONOUS XMLHttpRequest, not fetch(): Seanime's ChromeDP.evaluate
+  // returns the value of the last expression and does not await a returned
+  // Promise, so `fetch(...).then(...)` (or an async IIFE) resolves to
+  // undefined/null and every request comes back empty. A sync XHR returns the
+  // body inline, so evaluate() hands back the real response string. Verified
+  // against the live site.
   async chromeFetch(url, options) {
     options = options || {};
     const browser = await this.ensureBrowser();
@@ -63,15 +70,17 @@ class Provider {
     const body = options.body;
 
     const js =
-      "(async () => {" +
-      "  const res = await fetch(" + JSON.stringify(url) + ", {" +
-      "    method: " + JSON.stringify(method) + "," +
-      "    headers: " + JSON.stringify(headers) + "," +
-      "    body: " + (body !== undefined ? JSON.stringify(body) : "undefined") + "," +
-      "    credentials: \"same-origin\"," +
-      "  });" +
-      "  const text = await res.text();" +
-      "  return JSON.stringify({ ok: res.ok, status: res.status, text: text });" +
+      "(function () {" +
+      "  try {" +
+      "    var xhr = new XMLHttpRequest();" +
+      "    xhr.open(" + JSON.stringify(method) + ", " + JSON.stringify(url) + ", false);" +
+      "    var h = " + JSON.stringify(headers) + ";" +
+      "    for (var k in h) { try { xhr.setRequestHeader(k, h[k]); } catch (e) {} }" +
+      "    xhr.send(" + (body !== undefined ? JSON.stringify(body) : "null") + ");" +
+      "    return JSON.stringify({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, text: xhr.responseText });" +
+      "  } catch (e) {" +
+      "    return JSON.stringify({ ok: false, status: 0, text: '', error: String(e) });" +
+      "  }" +
       "})()";
 
     const raw = await browser.evaluate(js);
