@@ -14,6 +14,10 @@ class Provider {
       Origin: this.base,
       Referer: this.base + "/",
       "X-Requested-With": "XMLHttpRequest",
+      // Rezka's official Android app identifies itself with these headers.
+      // Sending them mirrors genuine app traffic instead of generic scraping.
+      "X-Hdrezka-Android-App": "1",
+      "X-Hdrezka-Android-App-Version": "2.2.5",
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
     };
@@ -390,6 +394,12 @@ class Provider {
         continue;
       }
 
+      // Premium-only translators require a paid Rezka account and never
+      // return playable streams for anonymous requests, so skip them.
+      if (translator.isPremium) {
+        continue;
+      }
+
       // Movies use translator page URL directly.
       // Series use hash-encoded URL so the data object knows season/episode/translator.
       const episodeUrl = data.isMovie
@@ -410,6 +420,9 @@ class Provider {
         season: data.season,
         episode: data.episode,
         isMovie: data.isMovie === true,
+        isCamrip: translator.isCamrip || "0",
+        isAds: translator.isAds || "0",
+        isDirector: translator.isDirector || "0",
       };
 
       const sources = await this.getStreamSources(translatorData);
@@ -463,6 +476,15 @@ class Provider {
     // Movie extraction is different from series extraction.
     // Rezka movie pages can require JS/player initialization, so keep movie logic isolated.
     if (data.isMovie) {
+      // Rezka's own Android app fetches movie streams the same way as series
+      // streams: POST to ajax/get_cdn_series with action=get_movie. This is
+      // far more reliable than scraping the page or using a headless browser.
+      const ajaxSources = await this.getMovieAjaxSources(data);
+
+      if (ajaxSources.length > 0) {
+        return ajaxSources;
+      }
+
       const directSources = await this.getMoviePageSources(data);
 
       if (directSources.length > 0) {
@@ -490,6 +512,46 @@ class Provider {
       "&episode=" +
       encodeURIComponent(String(data.episode)) +
       "&action=get_stream";
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          ...this.headers,
+          Origin: this.base,
+          Referer: data.baseUrl || data.url || this.base + "/",
+        },
+        body: body,
+      });
+
+      if (res.ok) {
+        const text = await res.text();
+        const sources = this.extractSources(text);
+
+        if (sources.length > 0) {
+          return sources;
+        }
+      }
+    } catch (_) {}
+
+    return [];
+  }
+
+  async getMovieAjaxSources(data) {
+    const url = this.base + "/ajax/get_cdn_series/?t=" + Date.now();
+
+    const body =
+      "id=" +
+      encodeURIComponent(data.animeId) +
+      "&translator_id=" +
+      encodeURIComponent(data.translatorId) +
+      "&is_camrip=" +
+      encodeURIComponent(data.isCamrip || "0") +
+      "&is_ads=" +
+      encodeURIComponent(data.isAds || "0") +
+      "&is_director=" +
+      encodeURIComponent(data.isDirector || "0") +
+      "&action=get_movie";
 
     try {
       const res = await fetch(url, {
@@ -837,7 +899,46 @@ class Provider {
       .replace(/\\\\/g, "\\");
   }
 
+  // Rezka now obfuscates the "streams"/"url" payload as:
+  //   #h<part>//_//<16 junk chars><part>//_//<16 junk chars>...
+  // where the parts concatenate into a base64 string that decodes to the
+  // real "[360p]url or url,[480p]url,..." text. Without this step the
+  // payload never contains readable "[quality]" markers, so quality-block
+  // parsing silently returns zero sources. This mirrors Rezka's own Android
+  // app (FilmModel.decodeUrl), which is the source of truth for the format.
+  decodeRezkaStreamPayload(value) {
+    value = String(value || "");
+
+    if (value.indexOf("#h") !== 0) {
+      return value;
+    }
+
+    let cleaned = value.slice(2);
+
+    for (let i = 0; i < 20 && cleaned.indexOf("//_//") !== -1; i++) {
+      const index = cleaned.indexOf("//_//");
+      const junk = cleaned.slice(index, index + 21);
+
+      if (!junk) {
+        break;
+      }
+
+      cleaned = cleaned.split(junk).join("");
+    }
+
+    try {
+      const decoded = CryptoJS.enc.Utf8.stringify(CryptoJS.enc.Base64.parse(cleaned));
+
+      if (decoded) {
+        return decoded;
+      }
+    } catch (_) {}
+
+    return value;
+  }
+
   extractRezkaStreamSources(streams) {
+    streams = this.decodeRezkaStreamPayload(streams);
     streams = this.decodeRezkaEscapedString(streams);
     streams = this.removePremiumParts(streams);
 
@@ -1300,6 +1401,12 @@ class Provider {
       value = jsonUrlMatch[1].replace(/\\\//g, "/").replace(/\\/g, "");
     }
 
+    const rezkaDecoded = this.decodeRezkaStreamPayload(value);
+
+    if (rezkaDecoded && rezkaDecoded !== value && rezkaDecoded.indexOf("http") !== -1) {
+      return rezkaDecoded;
+    }
+
     const trash = [
       "@#@!",
       "//_//",
@@ -1707,11 +1814,17 @@ class Provider {
         this.cleanText(this.getAttr(tag, "title") || tag) ||
         "Translator " + id;
 
+      // Rezka's own Android app sends these flags back when requesting movie
+      // streams (action=get_movie), so they must be captured per-translator.
       translators.push({
         id: id,
         name: name,
         url: href ? this.absoluteUrl(href) : this.makeEpisodeUrl(url, id, 1, 1),
         index: translators.length,
+        isCamrip: this.getAttr(tag, "data-camrip") || "0",
+        isAds: this.getAttr(tag, "data-ads") || "0",
+        isDirector: this.getAttr(tag, "data-director") || "0",
+        isPremium: /b-prem_translator/i.test(tag),
       });
     }
 
