@@ -83,25 +83,34 @@ class Provider {
             if (found.size > 0) break
         }
 
+        console.log("[rezka] search: candidates =", JSON.stringify(titleCandidates), "found =", found.size)
         return Array.from(found.values())
     }
 
     async findEpisodes(id: string): Promise<EpisodeDetails[]> {
         const browser = await this.ensureBrowser()
         const url = id.startsWith("http") ? id : `${ORIGIN}${id}`
+        console.log("[rezka] findEpisodes: navigating to", url)
         const html = await this.browserGet(browser, url)
         const $ = LoadDoc(html)
 
         const postIdRaw = $("#post_id").attr("value")
-        if (!postIdRaw) throw new Error("Could not find the post id on the page.")
+        console.log("[rezka] findEpisodes: post_id =", postIdRaw)
+        // Errors are thrown as plain strings, not `new Error(...)`: Error objects
+        // have no own-enumerable properties, so Seanime's log ends up printing
+        // an empty `map[]` for them, losing the message. Strings survive intact.
+        if (!postIdRaw) throw "rezka: could not find #post_id on " + url
+
         const postId = Number(postIdRaw)
 
         const ogType = $('meta[property="og:type"]').attr("content") ?? ""
         const isSeries = ogType === "video.tv_series"
         const title = $(".b-post__title").text().trim()
+        console.log("[rezka] findEpisodes: ogType =", ogType, "title =", title)
 
         const translatorIds = this.findTranslatorIds($, html)
-        if (translatorIds.length === 0) throw new Error("Could not find any translator for this title.")
+        console.log("[rezka] findEpisodes: translatorIds =", JSON.stringify(translatorIds))
+        if (translatorIds.length === 0) throw "rezka: no translators found on " + url
 
         if (!isSeries) {
             return [{
@@ -118,6 +127,8 @@ class Provider {
             const resp = await this.browserPost<CdnEpisodesResponse>(browser, `${ORIGIN}/ajax/get_cdn_series/`, {
                 id: postId, translator_id: translatorId, action: "get_episodes",
             })
+            console.log("[rezka] findEpisodes: get_episodes translatorId =", translatorId,
+                "success =", resp?.success, "hasEpisodes =", !!resp?.episodes)
             if (!resp.success || !resp.episodes) continue
 
             const episodeMap = this.parseEpisodeItems(resp.episodes)
@@ -143,7 +154,7 @@ class Provider {
             }
         }
 
-        throw new Error("No episodes found for this title.")
+        throw "rezka: no episodes found for " + url
     }
 
     async findEpisodeServer(episode: EpisodeDetails, _server: string): Promise<EpisodeServer> {
@@ -155,7 +166,8 @@ class Provider {
             : { id: meta.postId, translator_id: meta.translatorId, action: "get_movie" }
 
         const resp = await this.browserPost<CdnStreamResponse>(browser, `${ORIGIN}/ajax/get_cdn_series/`, payload)
-        if (!resp.success || !resp.url) throw new Error("Failed to fetch the stream URL.")
+        console.log("[rezka] findEpisodeServer: success =", resp?.success, "hasUrl =", !!resp?.url)
+        if (!resp.success || !resp.url) throw "rezka: failed to fetch the stream URL for " + episode.id
 
         const subtitles = this.parseSubtitles(resp.subtitle, resp.subtitle_lns)
         const videoSources = this.parseVideoSources(resp.url, subtitles)
@@ -177,11 +189,13 @@ class Provider {
 
         // Rezka.ag runs an Anubis JS proof-of-work challenge on first visit.
         // A real Chromium tab solves it automatically; just give it a moment.
-        for (let i = 0; i < 6; i++) {
-            const title = await browser.evaluate("document.title") as string
-            if (!title.includes("бот") && title !== "Verify" && title !== "Проверяем, что вы не бот!") break
+        let title = ""
+        for (let i = 0; i < 8; i++) {
+            title = await browser.evaluate("document.title") as string
+            if (!title.includes("бот") && title !== "Verify") break
             await browser.sleep(1500)
         }
+        console.log("[rezka] ensureBrowser: final page title =", title)
 
         this.browser = browser
         return browser
@@ -212,7 +226,12 @@ class Provider {
             })()
         `
         const text = await browser.evaluate(js) as string
-        return JSON.parse(text) as T
+        console.log("[rezka] browserPost", url, "raw response:", String(text).slice(0, 300))
+        try {
+            return JSON.parse(text) as T
+        } catch {
+            throw "rezka: ajax response was not JSON: " + String(text).slice(0, 200)
+        }
     }
 
     // -- parsing helpers -------------------------------------------------------
